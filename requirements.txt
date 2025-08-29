@@ -1,2 +1,6 @@
 fastapi
-uvicorn[standard]
+uvicorn
+sqlmodel
+passlib[bcrypto]
+python-jose
+jinja2
