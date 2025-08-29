@@ -4,3 +4,4 @@ sqlmodel
 passlib[bcrypto]
 python-jose
 jinja2
+python-multipart
