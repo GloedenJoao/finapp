@@ -20,7 +20,7 @@
             <label for="amount" class="form-label small">Valor</label>
             <div class="input-group">
               <span class="input-group-text">R$</span>
-              <input type="number" step="0.01" min="0" id="amount" name="amount" class="form-control" placeholder="0,00" required>
+              <input type="number" step="0.01" min="0" id="amount" name="amount" class="form-control" placeholder="0.00" required inputmode="decimal">
             </div>
           </div>
 
@@ -43,23 +43,15 @@
           </div>
 
           <!-- Tipo (Entrada/Saída) -->
+          <!-- Tipo (Entrada/Saída) -->
           <div class="col-12 col-md-6">
             <label for="category_id" class="form-label small">Tipo</label>
             <select id="category_id" name="category_id" class="form-select" required>
-              {% set in_id = None %}
-              {% set out_id = None %}
-              {% for c in categories %}
-                {% if c.kind == 'in' and in_id is none %}{% set in_id = c.id %}{% endif %}
-                {% if c.kind == 'out' and out_id is none %}{% set out_id = c.id %}{% endif %}
-              {% endfor %}
-              {% if in_id %}
-                <option value="{{ in_id }}" selected>Entrada</option>
-              {% endif %}
-              {% if out_id %}
-                <option value="{{ out_id }}">Saída</option>
-              {% endif %}
+              <option value="{{ cat_in_id }}" selected>Entrada</option>
+              <option value="{{ cat_out_id }}">Saída</option>
             </select>
           </div>
+
 
           <!-- Descrição -->
           <div class="col-12 col-md-6">
@@ -97,16 +89,12 @@
               </tr>
             </thead>
             <tbody>
-              {% set in_id = None %}
-              {% set out_id = None %}
-              {% for c in categories %}
-                {% if c.kind == 'in' and in_id is none %}{% set in_id = c.id %}{% endif %}
-                {% if c.kind == 'out' and out_id is none %}{% set out_id = c.id %}{% endif %}
-              {% endfor %}
+              {% set in_id = cat_in_id %}
+              {% set out_id = cat_out_id %}
 
               {% for tx in txs %}
-              {% set is_in = (in_id is not none and tx.category_id == in_id) %}
-              {% set is_out = (out_id is not none and tx.category_id == out_id) %}
+              {% set is_in = (tx.category_id == in_id) %}
+              {% set is_out = (tx.category_id == out_id) %}
               <tr>
                 <td>{{ tx.tx_date or tx.date }}</td>
                 <td>{{ group_map.get(tx.group_id, '-') }}</td>
@@ -138,6 +126,7 @@
               </tr>
               {% endfor %}
             </tbody>
+
           </table>
         </div>
         {% else %}
@@ -158,7 +147,7 @@
           <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
         </div>
         <div class="modal-body">
-          <p class="mb-0">Tem certeza que deseja excluir esta transação?</p>
+          <p class="mb-1">Tem certeza que deseja excluir esta transação?</p>
           <small class="text-muted" id="deleteTxDesc"></small>
         </div>
         <div class="modal-footer">
@@ -186,9 +175,11 @@
     const txId   = button?.getAttribute('data-tx-id');
     const txDesc = button?.getAttribute('data-tx-desc') || '';
 
-    // Define a action do form para POST correto
-    formEl.setAttribute('action', /transactions/delete/${txId});
-    descEl.textContent = txDesc ? Descrição: ${txDesc} : '';
+    // Action correta (POST) para exclusão
+    formEl.setAttribute('action', `/transactions/delete/${txId}`);
+
+    // Mostra a descrição (se houver)
+    descEl.textContent = txDesc ? `Descrição: ${txDesc}` : '';
   });
 })();
 </script>

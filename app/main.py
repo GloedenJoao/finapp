@@ -151,6 +151,39 @@ def normalize_types(uid: int) -> None:
         if need_commit:
             s.commit()
 
+def get_or_create_in_out_categories(uid: int):
+    """Retorna (cat_in, cat_out, categories_list). Cria se não existir."""
+    with Session(engine) as s:
+        # normaliza o que já existir
+        cats = s.exec(select(Category).where(Category.user_id == uid)).all()
+        changed = False
+        for c in cats:
+            name_low = (c.name or "").strip().lower()
+            if name_low == "entrada" and c.kind != "in":
+                c.kind = "in"; changed = True
+            if name_low in ("saída", "saida") and c.kind != "out":
+                c.kind = "out"; changed = True
+        if changed:
+            s.commit()
+
+        # relê
+        cats = s.exec(select(Category).where(Category.user_id == uid)).all()
+        cat_in  = next((c for c in cats if c.kind == "in"), None)
+        cat_out = next((c for c in cats if c.kind == "out"), None)
+
+        # cria se faltar
+        need_commit = False
+        if cat_in is None:
+            cat_in = Category(user_id=uid, name="Entrada", kind="in")
+            s.add(cat_in); need_commit = True
+        if cat_out is None:
+            cat_out = Category(user_id=uid, name="Saída", kind="out")
+            s.add(cat_out); need_commit = True
+        if need_commit:
+            s.commit()
+            s.refresh(cat_in); s.refresh(cat_out)
+
+        return cat_in, cat_out, [cat_in, cat_out]
 
 # -----------------------------
 # Grupos
@@ -274,22 +307,43 @@ def _runtime_migrate_groups():
             s.exec(text("ALTER TABLE 'transaction' ADD COLUMN group_id INTEGER"))
             s.commit()
 
-    # garante account_id NULLABLE se necessário (reconstrói a tabela)
-    _rebuild_transaction_table_if_needed()
-
-    # cria grupo padrão e backfill de group_id
+    # cria grupo padrão e backfill + LIMPEZA DE ÓRFÃOS
     with Session(engine) as s:
         users = s.exec(select(User)).all()
         for u in users:
-            g = s.exec(select(Group).where(Group.user_id == u.id, Group.name == "Conta Corrente")).first()
-            if not g:
-                g = Group(user_id=u.id, name="Conta Corrente")
-                s.add(g); s.commit(); s.refresh(g)
+            # garante grupo padrão do usuário
+            g_default = s.exec(
+                select(Group).where(Group.user_id == u.id, Group.name == "Conta Corrente")
+            ).first()
+            if not g_default:
+                g_default = Group(user_id=u.id, name="Conta Corrente")
+                s.add(g_default); s.commit(); s.refresh(g_default)
+
+            # 1) preenche nulos
             s.execute(
-                text("UPDATE 'transaction' SET group_id=:gid WHERE user_id=:uid AND (group_id IS NULL OR group_id='')"),
-                {"gid": g.id, "uid": u.id},
+                text("""
+                    UPDATE "transaction"
+                       SET group_id = :gid
+                     WHERE user_id = :uid
+                       AND (group_id IS NULL OR group_id = '')
+                """),
+                {"gid": g_default.id, "uid": u.id},
             )
             s.commit()
+
+            # 2) reatribui grupos QUE NÃO EXISTEM MAIS (órfãos) para o default
+            s.execute(
+                text("""
+                    UPDATE "transaction"
+                       SET group_id = :gid
+                     WHERE user_id = :uid
+                       AND group_id IS NOT NULL
+                       AND group_id NOT IN (SELECT id FROM "group" WHERE user_id = :uid)
+                """),
+                {"gid": g_default.id, "uid": u.id},
+            )
+            s.commit()
+
 
 
 # -----------------------------
@@ -661,10 +715,42 @@ def groups_new(request: Request, name: str = Form(...)):
 def groups_delete(request: Request, gid: int):
     uid = require_user(request)
     with Session(engine) as s:
-        g = s.get(Group, gid)
-        if g and g.user_id == uid:
-            s.delete(g); s.commit()
+        g_del = s.get(Group, gid)
+        if not g_del or g_del.user_id != uid:
+            return RedirectResponse("/groups", status_code=303)
+
+        # Escolhe um grupo alvo diferente do que será excluído
+        target = s.exec(
+            select(Group).where(Group.user_id == uid, Group.id != gid).order_by(Group.id.asc())
+        ).first()
+
+        # Se não houver outro grupo, cria um padrão novo
+        if not target:
+            target = s.exec(
+                select(Group).where(Group.user_id == uid, Group.name == "Conta Corrente")
+            ).first()
+            if not target or target.id == gid:
+                target = Group(user_id=uid, name="Conta Corrente")
+                s.add(target); s.commit(); s.refresh(target)
+
+        # Reatribui todas as transações do grupo deletado para o grupo alvo
+        s.execute(
+            text("""
+                UPDATE "transaction"
+                   SET group_id = :to_gid
+                 WHERE user_id = :uid
+                   AND group_id = :from_gid
+            """),
+            {"to_gid": target.id, "uid": uid, "from_gid": gid},
+        )
+        s.commit()
+
+        # Agora pode deletar o grupo com segurança
+        s.delete(g_del)
+        s.commit()
+
     return RedirectResponse("/groups", status_code=303)
+
 
 
 @app.get("/api/groups")
@@ -683,23 +769,18 @@ def api_groups(request: Request):
 @app.get("/transactions", response_class=HTMLResponse)
 def transactions_page(request: Request):
     uid = require_user(request)
-    normalize_types(uid)
     ensure_default_group(uid)
 
+    # Garante que existam as categorias Entrada/Saída e pega seus IDs
+    cat_in, cat_out, categories = get_or_create_in_out_categories(uid)
+
     with Session(engine) as s:
-        cat_all = s.exec(select(Category).where(Category.user_id == uid)).all()
-        cat_in = next((c for c in cat_all if c.kind == "in"), None)
-        cat_out = next((c for c in cat_all if c.kind == "out"), None)
-        categories = [c for c in (cat_in, cat_out) if c]
-
         groups = get_user_groups(uid)
-
         txs = s.exec(
             select(Transaction)
             .where(Transaction.user_id == uid)
             .order_by(Transaction.tx_date.desc(), Transaction.id.desc())
         ).all()
-
         group_map = {g.id: g.name for g in groups}
 
     return render(
@@ -707,11 +788,15 @@ def transactions_page(request: Request):
         title="Transactions",
         user_id=uid,
         groups=groups,
-        categories=categories,
+        categories=categories,              # pode manter se quiser, mas não vamos depender disso
         txs=txs,
         group_map=group_map,
         today=today_date().isoformat(),
+        cat_in_id=cat_in.id,                # >>> ADICIONADO
+        cat_out_id=cat_out.id,              # >>> ADICIONADO
     )
+
+
 
 
 @app.post("/transactions/new")
@@ -724,6 +809,8 @@ def create_transaction(
     description: str = Form(default="")
 ):
     uid = require_user(request)
+
+    # data
     try:
         d = date.fromisoformat(date_str)
     except Exception:
@@ -731,13 +818,18 @@ def create_transaction(
 
     default_group = ensure_default_group(uid)
 
+    # garante tipos e usa Entrada por padrão se vier vazio
+    cat_in, cat_out, _ = get_or_create_in_out_categories(uid)
+    if category_id is None:
+        category_id = cat_in.id
+
     with Session(engine) as s:
-        if category_id is None:
-            raise HTTPException(status_code=400, detail="Tipo (Entrada/Saída) é obrigatório")
+        # valida tipo
         cat = s.exec(select(Category).where(Category.id == category_id, Category.user_id == uid)).first()
         if not cat:
             raise HTTPException(status_code=400, detail="Tipo inválido")
 
+        # valida grupo (ou usa padrão)
         if group_id is not None:
             g = s.exec(select(Group).where(Group.id == group_id, Group.user_id == uid)).first()
             if not g:
@@ -755,7 +847,9 @@ def create_transaction(
             account_id=None,
         )
         s.add(tx); s.commit()
+
     return RedirectResponse("/transactions", status_code=302)
+
 
 
 @app.post("/transactions/delete/{tx_id}")
