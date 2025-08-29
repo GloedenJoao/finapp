@@ -553,8 +553,9 @@ def home(
 
     # ➜ mantém só dias com movimento
     display_rows = _prune_empty_days(filtered)
+    
 
-    return render(
+    return render( 
         "home.html",
         title="FinApp",
         user_id=uid,
