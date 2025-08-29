@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="vstack gap-3">
+  <div class="card">
+    <div class="card-body">
+      <h2 class="h6 mb-3">Adicionar lançamento</h2>
+
+      <form class="row g-2" action="/transactions/new" method="post" novalidate>
+        <div class="col-12">
+          <label class="form-label small" for="amount">Valor</label>
+          <div class="input-group">
+            <span class="input-group-text">R$</span>
+            <input id="amount" class="form-control" type="number" step="0.01" inputmode="decimal" name="amount" placeholder="0,00" required>
+          </div>
+        </div>
+
+        <div class="col-6">
+          <label class="form-label small" for="date">Data</label>
+          <input id="date" class="form-control" type="date" name="date" value="{{ today }}" required>
+        </div>
+
+        <div class="col-6">
+          <label class="form-label small" for="group_id">Grupo</label>
+          <select id="group_id" class="form-select" name="group_id">
+            {% for g in groups %}
+              <option value="{{ g.id }}" {% if g.name == "Conta Corrente" %}selected{% endif %}>
+                {{ g.name }}
+              </option>
+            {% endfor %}
+          </select>
+          <div class="form-text">Gerencie em <a href="/groups">Grupos</a>.</div>
+        </div>
+
+        <div class="col-6">
+          <label class="form-label small" for="category_id">Tipo</label>
+          <select id="category_id" class="form-select" name="category_id" required>
+            {% for c in categories %}
+              <option value="{{ c.id }}" {% if c.kind == "in" %}selected{% endif %}>
+                {{ "Entrada" if c.kind == "in" else "Saída" }}
+              </option>
+            {% endfor %}
+          </select>
+        </div>
+
+        <div class="col-12">
+          <label class="form-label small" for="description">Descrição</label>
+          <input id="description" class="form-control" type="text" name="description" placeholder="Opcional">
+        </div>
+
+        <div class="col-12">
+          <button class="btn btn-success w-100">Adicionar</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-body">
+      <h2 class="h6 mb-3">Lançamentos recentes</h2>
+      {% if txs and txs|length > 0 %}
+        <ul class="list-group">
+          {% for t in txs %}
+            <li class="list-group-item d-flex justify-content-between align-items-center">
+              <div class="me-2">
+                <div class="fw-semibold">{{ t.tx_date }}</div>
+                <div class="text-muted small">{{ t.description }}</div>
+                <div class="text-muted small">{{ group_map.get(t.group_id, "Sem grupo") }}</div>
+              </div>
+              <div class="d-flex align-items-center gap-2">
+                <div class="text-end">
+                  <div class="fw-bold">R$ {{ "%.2f"|format(t.amount) }}</div>
+                </div>
+
+                <!-- IMPORTANTE: method POST e action ABSOLUTO começando com / -->
+                <form method="post" action="/transactions/delete/{{ t.id }}" class="tx-delete-form" data-id="{{ t.id }}">
+                  <button type="submit" class="btn btn-sm btn-outline-danger" title="Excluir" aria-label="Excluir lançamento {{ t.id }}">×</button>
+                </form>
+              </div>
+            </li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p class="text-muted mb-0">Nenhum lançamento ainda.</p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/transactions.js"></script>
+{% endblock %}

@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="row g-3">
+  <div class="col-12 col-lg-6">
+    <div class="card w-100">
+      <div class="card-body">
+        <h2 class="h6 mb-3">Meus grupos</h2>
+
+        <!-- Formulário para criar grupo -->
+        <form action="/groups/new" method="post" class="row g-2 mb-3">
+          <div class="col-8">
+            <input type="text" name="name" class="form-control" placeholder="Nome do grupo" required>
+          </div>
+          <div class="col-4">
+            <button type="submit" class="btn btn-dark w-100">Adicionar</button>
+          </div>
+        </form>
+
+        {% if groups and groups|length > 0 %}
+          <div class="table-responsive">
+            <table class="table table-sm align-middle">
+              <thead>
+                <tr>
+                  <th>Nome</th>
+                  <th style="width: 80px"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for g in groups %}
+                <tr>
+                  <td>{{ g.name }}</td>
+                  <td class="text-end">
+                    <form action="/groups/delete/{{ g.id }}" method="post" style="display:inline;">
+                      <button type="submit" class="btn btn-sm btn-outline-danger"
+                              onclick="return confirm('Excluir grupo {{ g.name }}?');">
+                        Excluir
+                      </button>
+                    </form>
+                  </td>
+                </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% else %}
+          <p class="text-muted mb-0">Nenhum grupo cadastrado ainda.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}

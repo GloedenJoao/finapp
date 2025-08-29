@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="row g-3">
+  <div class="col-12 col-lg-6">
+    <div class="card w-100">
+      <div class="card-body">
+        <div class="d-flex align-items-center justify-content-between mb-2">
+          <h2 class="h6 mb-0">Distribuição do saldo por grupo</h2>
+        </div>
+
+        <!-- Filtro de data -->
+        <form class="row g-2 mb-3" method="get" action="/dash">
+          <div class="col-auto">
+            <label for="d" class="form-label small">Data</label>
+            <input type="date" id="d" name="d" class="form-control form-control-sm" value="{{ target_val }}">
+          </div>
+          <div class="col-auto align-self-end">
+            <button class="btn btn-sm btn-dark">Aplicar</button>
+          </div>
+        </form>
+
+        {% if pie_labels and pie_labels|length > 0 %}
+          <div class="ratio ratio-1x1">
+            <canvas id="pieChart"></canvas>
+          </div>
+          <p class="text-muted small mt-2 mb-0">
+            Mostra o saldo acumulado (Entrou − Saiu) por grupo até a data selecionada. Somente saldos positivos são exibidos.
+          </p>
+        {% else %}
+          <div class="alert alert-light border small mb-0">
+            Sem grupos com saldo positivo nesta data.
+          </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+<script>
+(function () {
+  const labels = {{ pie_labels | tojson }};
+  const values = {{ pie_values | tojson }};
+
+  const el = document.getElementById('pieChart');
+  if (!el) return;
+
+  new Chart(el, {
+    type: 'pie',
+    data: {
+      labels: labels,
+      datasets: [{
+        data: values
+      }]
+    },
+    options: {
+      responsive: true,
+      plugins: {
+        legend: { position: 'bottom' },
+        tooltip: {
+          callbacks: {
+            label: (ctx) => {
+              const val = ctx.parsed || 0;
+              const nf = new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+              return ${ctx.label}: R$ ${nf.format(val)};
+            }
+          }
+        }
+      }
+    }
+  });
+})();
+</script>
+{% endblock %}

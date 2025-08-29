@@ -1,0 +1,103 @@
+:root {
+  --baby-blue: #89CFF0;       /* azul bebê principal */
+  --baby-blue-600: #73BDE3;   /* versão mais escura */
+  --baby-blue-100: #E8F6FF;   /* fundo suave */
+  --ink: #0b2239;             /* texto principal */
+  --ink-60: rgba(11,34,57,.6);
+
+  --header-h: 64px;
+  --footer-h: 48px;
+}
+
+html, body { height: 100%; }
+body {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  color: var(--ink);
+  background: #fff;
+}
+
+/* Navbar */
+.finapp-navbar {
+  background: var(--baby-blue);
+  min-height: var(--header-h);
+  display: flex;
+  align-items: center;
+}
+.finapp-navbar .navbar-brand .logo-text {
+  letter-spacing: .3px;
+  color: var(--ink);
+}
+.finapp-navbar .nav-link {
+  color: var(--ink);
+  opacity: .85;
+}
+.finapp-navbar .nav-link:hover,
+.finapp-navbar .nav-link.active {
+  opacity: 1;
+}
+.navbar-toggler {
+  border-color: rgba(0,0,0,.2);
+}
+.navbar-toggler-icon {
+  filter: invert(20%);
+}
+
+/* Conteúdo principal ocupa toda a altura que sobra */
+.finapp-main {
+  min-height: calc(100vh - var(--header-h) - var(--footer-h));
+}
+
+/* Rodapé */
+.finapp-footer {
+  min-height: var(--footer-h);
+}
+
+/* Cartões e inputs */
+.card {
+  border: 1px solid rgba(0,0,0,.06);
+  border-radius: 14px;
+}
+.form-control, .form-select {
+  border-radius: 10px;
+}
+
+/* Botões */
+.btn-dark {
+  background: var(--ink);
+  border-color: var(--ink);
+}
+.btn-dark:hover {
+  background: #0d2a45;
+  border-color: #0d2a45;
+}
+.btn-light {
+  background: #fff;
+  border-color: #fff;
+}
+.btn-light:hover {
+  background: var(--baby-blue-100);
+  border-color: var(--baby-blue-100);
+}
+
+/* Logo imagem */
+.logo-img {
+  border-radius: 6px;
+  box-shadow: 0 1px 0 rgba(0,0,0,.06);
+}
+
+/* Links */
+a { color: var(--ink); }
+a:hover { color: #0d2a45; }
+
+/* Força containers a usarem largura total */
+.finapp-navbar nav,
+.finapp-main > div,
+.finapp-footer > div {
+  max-width: 100% !important;
+}
+
+/* Utilidades */
+.bg-baby-blue { background: var(--baby-blue) !important; }
+.text-ink-60 { color: var(--ink-60) !important; }

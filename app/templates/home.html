@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="row g-3">
+  <!-- Resumo do mês -->
+  <div class="col-12 col-lg-6">
+    <div class="card w-100">
+      <div class="card-body">
+        <h2 class="h6 mb-3">Resumo do mês{% if month %} ({{ month }}){% endif %}</h2>
+        {% if groups %}
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead>
+              <tr>
+                <th>Grupo</th>
+                <th class="text-end">Entrou</th>
+                <th class="text-end">Saiu</th>
+                <th class="text-end">Saldo</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for g in groups %}
+              <tr>
+                <td>{{ g.name }}</td>
+                <td class="text-end text-success">R$ {{ "%.2f"|format(g.in) }}</td>
+                <td class="text-end text-danger">R$ {{ "%.2f"|format(g.out) }}</td>
+                <td class="text-end fw-semibold">R$ {{ "%.2f"|format(g.net) }}</td>
+              </tr>
+              {% endfor %}
+            </tbody>
+            <tfoot>
+              <tr class="table-light">
+                <th>Total</th>
+                <th class="text-end text-success">R$ {{ "%.2f"|format(totals.in if totals else 0) }}</th>
+                <th class="text-end text-danger">R$ {{ "%.2f"|format(totals.out if totals else 0) }}</th>
+                <th class="text-end fw-bold">R$ {{ "%.2f"|format(totals.net if totals else 0) }}</th>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+        {% else %}
+          <p class="text-muted">Nenhum dado para exibir.</p>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Movimentação diária (oculta por padrão) -->
+  <div class="col-12">
+    <div class="card w-100">
+      <div class="card-body">
+        <h2 class="h6 mb-3">Movimentação diária</h2>
+
+        <div class="accordion" id="accordionDaily">
+          <div class="accordion-item">
+            <h2 class="accordion-header" id="headingDaily">
+              <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#collapseDaily" aria-expanded="false" aria-controls="collapseDaily">
+                Mostrar movimentação diária
+              </button>
+            </h2>
+            <div id="collapseDaily" class="accordion-collapse collapse" aria-labelledby="headingDaily" data-bs-parent="#accordionDaily">
+              <div class="accordion-body">
+                
+                <form class="row g-2 mb-3" method="get" action="/">
+                  <div class="col-auto">
+                    <label for="start" class="form-label small">Início</label>
+                    <input type="date" id="start" name="start" class="form-control form-control-sm"
+                           value="{{ start_val }}">
+                  </div>
+                  <div class="col-auto">
+                    <label for="end" class="form-label small">Fim</label>
+                    <input type="date" id="end" name="end" class="form-control form-control-sm"
+                           value="{{ end_val }}">
+                  </div>
+                  <div class="col-auto align-self-end">
+                    <button type="submit" class="btn btn-sm btn-dark">Filtrar</button>
+                  </div>
+                </form>
+
+                {% if day_rows %}
+                <div class="table-responsive">
+                  <table class="table table-sm align-middle">
+                    <thead>
+                      <tr>
+                        <th>Dia</th>
+                        <th>Grupo</th>
+                        <th class="text-end">Entrou</th>
+                        <th class="text-end">Saiu</th>
+                        <th class="text-end">Resultado</th>
+                        <th class="text-end">Saldo acumulado</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {% for d in day_rows %}
+                        {% for r in d.rows %}
+                        <tr>
+                          <td>{{ d.day }}</td>
+                          <td>{{ r.group }}</td>
+                          <td class="text-end text-success">R$ {{ "%.2f"|format(r.in) }}</td>
+                          <td class="text-end text-danger">R$ {{ "%.2f"|format(r.out) }}</td>
+                          <td class="text-end">R$ {{ "%.2f"|format(r.net) }}</td>
+                          <td class="text-end fw-semibold">R$ {{ "%.2f"|format(r.balance) }}</td>
+                        </tr>
+                        {% endfor %}
+                      {% endfor %}
+                    </tbody>
+                  </table>
+                </div>
+                {% else %}
+                  <p class="text-muted">Nenhuma movimentação no período.</p>
+                {% endif %}
+
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+{% endblock %}

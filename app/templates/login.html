@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block content %}
+<form action="/login" method="post" class="vstack gap-3">
+  <input id="email" name="email" type="email" class="form-control" required>
+  <input id="password" name="password" type="password" class="form-control" required>
+  <button class="btn btn-dark w-100">Entrar</button>
+</form>
+{% endblock %}

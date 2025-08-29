@@ -1,0 +1,17 @@
+<svg width="180" height="40" viewBox="0 0 180 40" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="FinApp">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#89CFF0"/>
+      <stop offset="100%" stop-color="#73BDE3"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Ícone -->
+  <rect x="2" y="2" width="36" height="36" rx="8" fill="url(#g)"/>
+  <path d="M14 25 l6-10 h6 l-6 10 h-6 z M14 25 h16 v4 h-16 z" fill="#0b2239" opacity="0.95"/>
+
+  <!-- Wordmark -->
+  <text x="48" y="27" font-family="Segoe UI, Inter, system-ui, -apple-system, sans-serif" font-size="20" fill="#0b2239" letter-spacing="0.4">
+    <tspan font-weight="700">Fin</tspan><tspan font-weight="600">App</tspan>
+  </text>
+</svg>
