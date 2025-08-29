@@ -307,42 +307,33 @@ def _runtime_migrate_groups():
             s.exec(text("ALTER TABLE 'transaction' ADD COLUMN group_id INTEGER"))
             s.commit()
 
-    # cria grupo padrão e backfill + LIMPEZA DE ÓRFÃOS
+    # Limpeza de transações órfãs (group_id nulo ou grupo inexistente) por usuário
     with Session(engine) as s:
         users = s.exec(select(User)).all()
         for u in users:
-            # garante grupo padrão do usuário
-            g_default = s.exec(
-                select(Group).where(Group.user_id == u.id, Group.name == "Conta Corrente")
-            ).first()
-            if not g_default:
-                g_default = Group(user_id=u.id, name="Conta Corrente")
-                s.add(g_default); s.commit(); s.refresh(g_default)
-
-            # 1) preenche nulos
+            # remove NULL/'' (algum legado)
             s.execute(
                 text("""
-                    UPDATE "transaction"
-                       SET group_id = :gid
+                    DELETE FROM "transaction"
                      WHERE user_id = :uid
                        AND (group_id IS NULL OR group_id = '')
                 """),
-                {"gid": g_default.id, "uid": u.id},
+                {"uid": u.id},
             )
             s.commit()
 
-            # 2) reatribui grupos QUE NÃO EXISTEM MAIS (órfãos) para o default
+            # remove group_id que não existe mais para este usuário
             s.execute(
                 text("""
-                    UPDATE "transaction"
-                       SET group_id = :gid
+                    DELETE FROM "transaction"
                      WHERE user_id = :uid
                        AND group_id IS NOT NULL
                        AND group_id NOT IN (SELECT id FROM "group" WHERE user_id = :uid)
                 """),
-                {"gid": g_default.id, "uid": u.id},
+                {"uid": u.id},
             )
             s.commit()
+
 
 
 
@@ -719,37 +710,23 @@ def groups_delete(request: Request, gid: int):
         if not g_del or g_del.user_id != uid:
             return RedirectResponse("/groups", status_code=303)
 
-        # Escolhe um grupo alvo diferente do que será excluído
-        target = s.exec(
-            select(Group).where(Group.user_id == uid, Group.id != gid).order_by(Group.id.asc())
-        ).first()
-
-        # Se não houver outro grupo, cria um padrão novo
-        if not target:
-            target = s.exec(
-                select(Group).where(Group.user_id == uid, Group.name == "Conta Corrente")
-            ).first()
-            if not target or target.id == gid:
-                target = Group(user_id=uid, name="Conta Corrente")
-                s.add(target); s.commit(); s.refresh(target)
-
-        # Reatribui todas as transações do grupo deletado para o grupo alvo
+        # 1) Apaga todas as transações que pertencem a este grupo
         s.execute(
             text("""
-                UPDATE "transaction"
-                   SET group_id = :to_gid
+                DELETE FROM "transaction"
                  WHERE user_id = :uid
-                   AND group_id = :from_gid
+                   AND group_id = :gid
             """),
-            {"to_gid": target.id, "uid": uid, "from_gid": gid},
+            {"uid": uid, "gid": gid},
         )
         s.commit()
 
-        # Agora pode deletar o grupo com segurança
+        # 2) Apaga o grupo
         s.delete(g_del)
         s.commit()
 
     return RedirectResponse("/groups", status_code=303)
+
 
 
 
