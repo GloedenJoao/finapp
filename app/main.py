@@ -9,11 +9,14 @@ from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
 from jose import jwt, JWTError
 from passlib.context import CryptContext
-from sqlalchemy import func, text
+from sqlalchemy import func, text, case
 from sqlmodel import Session, select
 
 from .db import engine, init_db
 from .models import User, Category, Transaction, Group
+
+import json
+
 
 # -----------------------------
 # Config
@@ -93,6 +96,83 @@ def month_bounds() -> Tuple[date, date, str]:
     else:
         next_month_first = first_day.replace(month=first_day.month + 1)
     return first_day, next_month_first, first_day.strftime("%Y-%m")
+
+def month_first(day: date) -> date:
+    return day.replace(day=1)
+
+def parse_month(s: Optional[str]) -> Optional[date]:
+    if not s:
+        return None
+    try:
+        y, m = s.split("-")
+        return date(int(y), int(m), 1)
+    except Exception:
+        return None
+
+def next_month(d: date) -> date:
+    if d.month == 12:
+        return date(d.year + 1, 1, 1)
+    return date(d.year, d.month + 1, 1)
+
+def iter_months(start_m: date, end_m: date):
+    cur = month_first(start_m)
+    end = month_first(end_m)
+    while cur <= end:
+        yield cur
+        cur = next_month(cur)
+
+def monthly_net_totals(uid: int, start_m: date, end_m: date):
+    months = list(iter_months(start_m, end_m))
+    labels = [m.strftime("%Y-%m") for m in months]
+
+    groups = get_user_groups(uid)
+    name_by_gid = {g.id: g.name for g in groups}
+
+    start_date = months[0]
+    end_exclusive = next_month(months[-1])
+
+    with Session(engine) as s:
+        stmt = (
+            select(
+                func.strftime("%Y-%m", Transaction.tx_date).label("ym"),
+                Transaction.group_id,
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (Category.kind == "in", Transaction.amount),
+                            else_=-Transaction.amount
+                        )
+                    ), 0.0
+                ).label("net")
+            )
+            .select_from(Transaction)
+            .join(Category, Category.id == Transaction.category_id)
+            .where(
+                Transaction.user_id == uid,
+                Transaction.tx_date >= start_date,
+                Transaction.tx_date < end_exclusive,
+                Category.kind.in_(("in", "out")),
+            )
+            .group_by("ym", Transaction.group_id)
+            .order_by("ym")
+        )
+        rows = list(s.exec(stmt).all())
+
+    index_by_label = {lab: i for i, lab in enumerate(labels)}
+    by_group = {name_by_gid[gid]: [0.0]*len(labels) for gid in name_by_gid}
+    total = [0.0]*len(labels)
+
+    for ym, gid, net in rows:
+        i = index_by_label.get(ym)
+        if i is None:
+            continue
+        val = float(net or 0.0)
+        total[i] += val
+        if gid in name_by_gid:
+            by_group[name_by_gid[gid]][i] += val
+
+    return {"labels": labels, "total": total, "by_group": by_group}
+
 
 
 # -----------------------------
@@ -674,6 +754,113 @@ def signup_post(email: str = Form(), password: str = Form()):
     resp = RedirectResponse("/", status_code=302)
     resp.set_cookie("access_token", token, httponly=True, secure=False)
     return resp
+
+# --- helper: saldo por grupo no dia (posição) ---
+from sqlalchemy import case
+
+def balances_by_group_on(uid: int, on_date: date):
+    """
+    Retorna lista de dicts [{id, name, balance}] com o saldo acumulado por grupo
+    até 'on_date' (inclusive). Saldo = Entrada - Saída.
+    """
+    groups = get_user_groups(uid)
+    name_by_gid = {g.id: g.name for g in groups}
+    if not groups:
+        return []
+
+    with Session(engine) as s:
+        stmt = (
+            select(
+                Transaction.group_id,
+                func.coalesce(
+                    func.sum(
+                        case(
+                            (Category.kind == "in",  Transaction.amount),
+                            else_=-Transaction.amount
+                        )
+                    ),
+                    0.0
+                ).label("balance")
+            )
+            .select_from(Transaction)
+            .join(Category, Category.id == Transaction.category_id)
+            .where(
+                Transaction.user_id == uid,
+                Transaction.tx_date <= on_date,
+                Category.kind.in_(("in", "out")),
+            )
+            .group_by(Transaction.group_id)
+        )
+        rows = list(s.exec(stmt).all())
+
+    # normaliza para incluir grupos sem movimento com saldo 0
+    balance_by_gid = {gid: 0.0 for gid in name_by_gid.keys()}
+    for gid, bal in rows:
+        if gid is not None:
+            balance_by_gid[gid] = float(bal or 0.0)
+
+    result = [
+        {"id": gid, "name": name_by_gid[gid], "balance": balance_by_gid[gid]}
+        for gid in sorted(name_by_gid.keys(), key=lambda x: name_by_gid[x].lower())
+    ]
+    return result
+
+
+# --- rota do dash ---
+@app.get("/dash", response_class=HTMLResponse)
+def dash_page(
+    request: Request,
+    on: Optional[str] = Query(default=None)  # 'YYYY-MM-DD'; default = hoje
+):
+    uid = require_user(request)
+
+    # data filtrada
+    on_date = parse_date_yyyy_mm_dd(on) or today_date()
+
+    # garante ao menos o grupo padrão (não cria transação, só o grupo)
+    ensure_default_group(uid)
+
+    # dados
+    data = balances_by_group_on(uid, on_date)
+    labels = [d["name"] for d in data]
+    values = [round(d["balance"], 2) for d in data]
+    total  = round(sum(values), 2)
+
+    return render(
+    "dash.html",
+    title="Dashboards",
+    user_id=uid,
+    on_val=on_date.isoformat(),
+    labels_json=json.dumps(labels, ensure_ascii=False),  # >>> usa JSON válido p/ JS
+    values_json=json.dumps(values),
+    total=total,
+)
+
+@app.get("/api/dash/monthly")
+def api_dash_monthly(request: Request, start: Optional[str] = None, end: Optional[str] = None):
+    uid = require_user(request)
+
+    today = today_date()
+    this_m = month_first(today)
+    default_end = this_m
+
+    # últimos 6 meses
+    m5 = this_m
+    for _ in range(5):
+        m5 = m5.replace(day=1)
+        m5 = date(m5.year - 1, 12, 1) if m5.month == 1 else date(m5.year, m5.month - 1, 1)
+    default_start = m5
+
+    start_m = parse_month(start) or default_start
+    end_m   = parse_month(end)   or default_end
+    if end_m < start_m:
+        end_m = start_m
+
+    data = monthly_net_totals(uid, start_m, end_m)
+    return JSONResponse(data, headers={"Cache-Control": "no-store"})
+
+
+
 
 
 @app.get("/logout")

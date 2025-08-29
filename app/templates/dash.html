@@ -1,39 +1,97 @@
 {% extends "base.html" %}
 {% block content %}
 
-<div class="row g-3">
-  <div class="col-12 col-lg-6">
-    <div class="card w-100">
-      <div class="card-body">
-        <div class="d-flex align-items-center justify-content-between mb-2">
-          <h2 class="h6 mb-0">Distribuição do saldo por grupo</h2>
+<div class="d-flex align-items-center justify-content-between mb-3">
+  <h1 class="h5 mb-0">Dashboards</h1>
+</div>
+
+<ul class="nav nav-tabs mb-3" role="tablist">
+  <li class="nav-item" role="presentation">
+    <button class="nav-link active" id="tab-now" data-bs-toggle="tab" data-bs-target="#pane-now" type="button" role="tab" aria-controls="pane-now" aria-selected="true">
+      Momento atual
+    </button>
+  </li>
+  <li class="nav-item" role="presentation">
+    <button class="nav-link" id="tab-mom" data-bs-toggle="tab" data-bs-target="#pane-mom" type="button" role="tab" aria-controls="pane-mom" aria-selected="false">
+      Comparativo mês a mês
+    </button>
+  </li>
+</ul>
+
+<div class="tab-content">
+  <!-- PANE 1: Momento atual -->
+  <div class="tab-pane fade show active" id="pane-now" role="tabpanel" aria-labelledby="tab-now" tabindex="0">
+    <form method="get" action="/dash" class="d-flex gap-2 align-items-center mb-3">
+      <label for="on" class="form-label mb-0 small">Data</label>
+      <input type="date" id="on" name="on" class="form-control form-control-sm" value="{{ on_val }}">
+      <button class="btn btn-primary btn-sm">Aplicar</button>
+    </form>
+
+    <div class="row g-3 mb-2">
+      <div class="col-12 col-md-4">
+        <div class="card h-100">
+          <div class="card-body">
+            <div class="small text-muted">Saldo total na data</div>
+            <div class="fs-4 fw-semibold {% if total >= 0 %}text-success{% else %}text-danger{% endif %}">
+              R$ {{ "%.2f"|format(total) }}
+            </div>
+          </div>
         </div>
-
-        <!-- Filtro de data -->
-        <form class="row g-2 mb-3" method="get" action="/dash">
-          <div class="col-auto">
-            <label for="d" class="form-label small">Data</label>
-            <input type="date" id="d" name="d" class="form-control form-control-sm" value="{{ target_val }}">
-          </div>
-          <div class="col-auto align-self-end">
-            <button class="btn btn-sm btn-dark">Aplicar</button>
-          </div>
-        </form>
-
-        {% if pie_labels and pie_labels|length > 0 %}
-          <div class="ratio ratio-1x1">
-            <canvas id="pieChart"></canvas>
-          </div>
-          <p class="text-muted small mt-2 mb-0">
-            Mostra o saldo acumulado (Entrou − Saiu) por grupo até a data selecionada. Somente saldos positivos são exibidos.
-          </p>
-        {% else %}
-          <div class="alert alert-light border small mb-0">
-            Sem grupos com saldo positivo nesta data.
-          </div>
-        {% endif %}
       </div>
     </div>
+
+    <!-- gráfico pizza -->
+    <div class="row g-3">
+      <div class="col-12 col-lg-6">
+        <div class="card h-100">
+          <div class="card-body">
+            <h2 class="h6 mb-3">Distribuição do saldo por grupo</h2>
+            <div class="ratio ratio-1x1">
+              <canvas id="pieBalances"></canvas>
+            </div>
+            <p class="text-muted mt-3 mb-0" id="pieMsg" style="display:none;">Nenhum dado para a data selecionada.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- PANE 2: Comparativo mês a mês -->
+  <div class="tab-pane fade" id="pane-mom" role="tabpanel" aria-labelledby="tab-mom" tabindex="0">
+    <form id="momForm" class="row g-2 align-items-end mb-3">
+      <div class="col-auto">
+        <label for="momStart" class="form-label mb-0 small">Mês início</label>
+        <input type="month" id="momStart" name="start" class="form-control form-control-sm">
+      </div>
+      <div class="col-auto">
+        <label for="momEnd" class="form-label mb-0 small">Mês fim</label>
+        <input type="month" id="momEnd" name="end" class="form-control form-control-sm">
+      </div>
+      <div class="col-auto">
+        <button class="btn btn-outline-primary btn-sm" type="submit">Aplicar</button>
+      </div>
+    </form>
+
+    <div class="card">
+      <div class="card-body">
+        <h2 class="h6 mb-3">Resumo por mês (Net)</h2>
+        <div class="table-responsive">
+          <table class="table table-sm align-middle mb-0" id="momTable">
+            <thead>
+              <tr>
+                <th>Mês</th>
+                <th class="text-end">Total (R$)</th>
+              </tr>
+            </thead>
+            <tbody>
+              <!-- preenchido via JS -->
+            </tbody>
+          </table>
+        </div>
+        <p class="text-muted mt-2 mb-0" id="momMsg" style="display:none;">Sem dados para o intervalo.</p>
+      </div>
+    </div>
+
   </div>
 </div>
 
@@ -42,37 +100,115 @@
 {% block scripts %}
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <script>
-(function () {
-  const labels = {{ pie_labels | tojson }};
-  const values = {{ pie_values | tojson }};
+(function() {
+  // ===== Momento atual (pizza) =====
+  const labels = {{ labels_json | safe }};
+  const values = {{ values_json | safe }};
+  const hasData = Array.isArray(labels) && labels.length > 0;
 
-  const el = document.getElementById('pieChart');
-  if (!el) return;
+  const pieLabels = hasData ? labels : ["Sem dados"];
+  const pieValues = hasData ? values.map(v => Math.abs(Number(v)||0)) : [0];
 
-  new Chart(el, {
-    type: 'pie',
-    data: {
-      labels: labels,
-      datasets: [{
-        data: values
-      }]
-    },
-    options: {
-      responsive: true,
-      plugins: {
-        legend: { position: 'bottom' },
-        tooltip: {
-          callbacks: {
-            label: (ctx) => {
-              const val = ctx.parsed || 0;
-              const nf = new Intl.NumberFormat('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-              return ${ctx.label}: R$ ${nf.format(val)};
+  document.getElementById('pieMsg').style.display = hasData ? 'none' : '';
+
+  try {
+    const ctxPie = document.getElementById('pieBalances').getContext('2d');
+    new Chart(ctxPie, {
+      type: 'pie',
+      data: {
+        labels: pieLabels,
+        datasets: [{
+          data: pieValues,
+          backgroundColor: [
+            "#4e79a7","#f28e2b","#e15759","#76b7b2",
+            "#59a14f","#edc949","#af7aa1","#ff9da7",
+            "#9c755f","#bab0ab"
+          ]
+        }]
+      },
+      options: {
+        responsive: true,
+        plugins: {
+          legend: { position: 'bottom' },
+          tooltip: {
+            callbacks: {
+              label: (ctx) => {
+                const v = Number(values[ctx.dataIndex]) || 0;
+                return `${ctx.label}: R$ ${v.toFixed(2)}`;
+              }
             }
           }
         }
       }
+    });
+  } catch (e) { console.error("Erro gráfico pizza:", e); }
+
+  // ===== Comparativo mês a mês (preparado) =====
+
+  // defaults: últimos 6 meses até o mês atual
+  function defaultMonthRange() {
+    const now = new Date();
+    const end = new Date(Date.UTC(now.getFullYear(), now.getMonth(), 1));
+    const start = new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth() - 5, 1));
+    const fmt = (d) => `${d.getUTCFullYear()}-${String(d.getUTCMonth()+1).padStart(2,'0')}`;
+    return { start: fmt(start), end: fmt(end) };
+  }
+
+  const range = defaultMonthRange();
+  const momStart = document.getElementById('momStart');
+  const momEnd   = document.getElementById('momEnd');
+  momStart.value = range.start;
+  momEnd.value   = range.end;
+
+  const momForm  = document.getElementById('momForm');
+  const momTable = document.querySelector('#momTable tbody');
+  const momMsg   = document.getElementById('momMsg');
+
+  async function loadMonthly() {
+    const s = momStart.value;
+    const e = momEnd.value;
+    const url = `/api/dash/monthly?start=${encodeURIComponent(s)}&end=${encodeURIComponent(e)}`;
+    try {
+      const resp = await fetch(url, { cache: 'no-store' });
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = await resp.json(); // {labels, total, by_group}
+
+      // preenche tabela simples (net total por mês)
+      momTable.innerHTML = '';
+      if (!data.labels || data.labels.length === 0) {
+        momMsg.style.display = '';
+        return;
+      }
+      momMsg.style.display = 'none';
+      data.labels.forEach((lab, i) => {
+        const tr = document.createElement('tr');
+        const tdM = document.createElement('td');
+        const tdT = document.createElement('td');
+        tdM.textContent = lab;
+        tdT.className = 'text-end ' + ((data.total[i]||0) >= 0 ? 'text-success' : 'text-danger');
+        tdT.textContent = `R$ ${(Number(data.total[i])||0).toFixed(2)}`;
+        tr.appendChild(tdM);
+        tr.appendChild(tdT);
+        momTable.appendChild(tr);
+      });
+    } catch (err) {
+      console.error('Falha ao carregar mensal:', err);
+      momTable.innerHTML = '';
+      momMsg.style.display = '';
     }
+  }
+
+  momForm.addEventListener('submit', function(ev) {
+    ev.preventDefault();
+    loadMonthly();
   });
+
+  // carrega uma vez ao abrir a aba (e quando entrar nela)
+  document.getElementById('tab-mom').addEventListener('shown.bs.tab', loadMonthly);
+  // se o usuário já estiver nessa aba ao recarregar:
+  if (document.getElementById('tab-mom').classList.contains('active')) {
+    loadMonthly();
+  }
 })();
 </script>
 {% endblock %}
