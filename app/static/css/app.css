@@ -101,3 +101,32 @@ a:hover { color: #0d2a45; }
 /* Utilidades */
 .bg-baby-blue { background: var(--baby-blue) !important; }
 .text-ink-60 { color: var(--ink-60) !important; }
+
+/* app/static/css/app.css */
+
+/* Cartões arredondados */
+.card {
+  border-radius: 1rem;
+}
+
+/* Botões arredondados */
+.btn {
+  border-radius: .6rem;
+}
+
+/* Ajuste geral de tipografia no mobile */
+@media (max-width: 576px) {
+  table.table td,
+  table.table th {
+    padding: .4rem .5rem;
+    font-size: .9rem;
+  }
+
+  h1, .h1 { font-size: 1.4rem; }
+  h2, .h2, .h6 { font-size: 1rem; }
+
+  /* Botões e inputs ocupam largura total */
+  .btn, .form-control, .form-select {
+    width: 100%;
+  }
+}

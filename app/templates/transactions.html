@@ -1,90 +1,195 @@
 {% extends "base.html" %}
 {% block content %}
-<div class="vstack gap-3">
-  <div class="card">
-    <div class="card-body">
-      <h2 class="h6 mb-3">Adicionar lançamento</h2>
 
-      <form class="row g-2" action="/transactions/new" method="post" novalidate>
-        <div class="col-12">
-          <label class="form-label small" for="amount">Valor</label>
-          <div class="input-group">
-            <span class="input-group-text">R$</span>
-            <input id="amount" class="form-control" type="number" step="0.01" inputmode="decimal" name="amount" placeholder="0,00" required>
+<div class="row g-3">
+  <!-- Formulário de lançamento -->
+  <div class="col-12 col-lg-5">
+    <div class="card w-100">
+      <div class="card-body">
+        <h2 class="h6 mb-3">Novo lançamento</h2>
+
+        <form action="/transactions/new" method="post" class="row g-3">
+          <!-- Data -->
+          <div class="col-12 col-md-6">
+            <label for="date" class="form-label small">Data</label>
+            <input type="date" id="date" name="date" class="form-control" value="{{ today }}" required>
           </div>
-        </div>
 
-        <div class="col-6">
-          <label class="form-label small" for="date">Data</label>
-          <input id="date" class="form-control" type="date" name="date" value="{{ today }}" required>
-        </div>
+          <!-- Valor -->
+          <div class="col-12 col-md-6">
+            <label for="amount" class="form-label small">Valor</label>
+            <div class="input-group">
+              <span class="input-group-text">R$</span>
+              <input type="number" step="0.01" min="0" id="amount" name="amount" class="form-control" placeholder="0,00" required>
+            </div>
+          </div>
 
-        <div class="col-6">
-          <label class="form-label small" for="group_id">Grupo</label>
-          <select id="group_id" class="form-select" name="group_id">
-            {% for g in groups %}
-              <option value="{{ g.id }}" {% if g.name == "Conta Corrente" %}selected{% endif %}>
-                {{ g.name }}
-              </option>
-            {% endfor %}
-          </select>
-          <div class="form-text">Gerencie em <a href="/groups">Grupos</a>.</div>
-        </div>
+          <!-- Grupo -->
+          <div class="col-12">
+            <label for="group_id" class="form-label small">Grupo</label>
+            <select id="group_id" name="group_id" class="form-select" required>
+              {% if groups and groups|length > 0 %}
+                {% for g in groups %}
+                  <option value="{{ g.id }}"
+                    {% if g.name|lower == 'conta corrente' %}selected{% endif %}>
+                    {{ g.name }}
+                  </option>
+                {% endfor %}
+              {% else %}
+                <option value="" disabled selected>Cadastre um grupo na aba "Grupos"</option>
+              {% endif %}
+            </select>
+            <div class="form-text">Gerencie os grupos em <a href="/groups">Grupos</a>.</div>
+          </div>
 
-        <div class="col-6">
-          <label class="form-label small" for="category_id">Tipo</label>
-          <select id="category_id" class="form-select" name="category_id" required>
-            {% for c in categories %}
-              <option value="{{ c.id }}" {% if c.kind == "in" %}selected{% endif %}>
-                {{ "Entrada" if c.kind == "in" else "Saída" }}
-              </option>
-            {% endfor %}
-          </select>
-        </div>
+          <!-- Tipo (Entrada/Saída) -->
+          <div class="col-12 col-md-6">
+            <label for="category_id" class="form-label small">Tipo</label>
+            <select id="category_id" name="category_id" class="form-select" required>
+              {% set in_id = None %}
+              {% set out_id = None %}
+              {% for c in categories %}
+                {% if c.kind == 'in' and in_id is none %}{% set in_id = c.id %}{% endif %}
+                {% if c.kind == 'out' and out_id is none %}{% set out_id = c.id %}{% endif %}
+              {% endfor %}
+              {% if in_id %}
+                <option value="{{ in_id }}" selected>Entrada</option>
+              {% endif %}
+              {% if out_id %}
+                <option value="{{ out_id }}">Saída</option>
+              {% endif %}
+            </select>
+          </div>
 
-        <div class="col-12">
-          <label class="form-label small" for="description">Descrição</label>
-          <input id="description" class="form-control" type="text" name="description" placeholder="Opcional">
-        </div>
+          <!-- Descrição -->
+          <div class="col-12 col-md-6">
+            <label for="description" class="form-label small">Descrição (opcional)</label>
+            <input type="text" id="description" name="description" class="form-control" placeholder="Ex.: mercado, salário, etc.">
+          </div>
 
-        <div class="col-12">
-          <button class="btn btn-success w-100">Adicionar</button>
-        </div>
-      </form>
+          <div class="col-12">
+            <button type="submit" class="btn btn-dark w-100">Lançar</button>
+          </div>
+        </form>
+      </div>
     </div>
   </div>
 
-  <div class="card">
-    <div class="card-body">
-      <h2 class="h6 mb-3">Lançamentos recentes</h2>
-      {% if txs and txs|length > 0 %}
-        <ul class="list-group">
-          {% for t in txs %}
-            <li class="list-group-item d-flex justify-content-between align-items-center">
-              <div class="me-2">
-                <div class="fw-semibold">{{ t.tx_date }}</div>
-                <div class="text-muted small">{{ t.description }}</div>
-                <div class="text-muted small">{{ group_map.get(t.group_id, "Sem grupo") }}</div>
-              </div>
-              <div class="d-flex align-items-center gap-2">
-                <div class="text-end">
-                  <div class="fw-bold">R$ {{ "%.2f"|format(t.amount) }}</div>
-                </div>
+  <!-- Lançamentos recentes -->
+  <div class="col-12 col-lg-7">
+    <div class="card w-100">
+      <div class="card-body">
+        <div class="d-flex align-items-center justify-content-between mb-2">
+          <h2 class="h6 mb-0">Lançamentos recentes</h2>
+        </div>
 
-                <!-- IMPORTANTE: method POST e action ABSOLUTO começando com / -->
-                <form method="post" action="/transactions/delete/{{ t.id }}" class="tx-delete-form" data-id="{{ t.id }}">
-                  <button type="submit" class="btn btn-sm btn-outline-danger" title="Excluir" aria-label="Excluir lançamento {{ t.id }}">×</button>
-                </form>
-              </div>
-            </li>
-          {% endfor %}
-        </ul>
-      {% else %}
-        <p class="text-muted mb-0">Nenhum lançamento ainda.</p>
-      {% endif %}
+        {% if txs and txs|length > 0 %}
+        <div class="table-responsive">
+          <table class="table table-sm align-middle">
+            <thead>
+              <tr>
+                <th style="white-space:nowrap;">Data</th>
+                <th>Grupo</th>
+                <th style="width:20%;">Tipo</th>
+                <th class="text-end" style="white-space:nowrap;">Valor</th>
+                <th>Descrição</th>
+                <th class="text-end" style="width: 64px;"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {% set in_id = None %}
+              {% set out_id = None %}
+              {% for c in categories %}
+                {% if c.kind == 'in' and in_id is none %}{% set in_id = c.id %}{% endif %}
+                {% if c.kind == 'out' and out_id is none %}{% set out_id = c.id %}{% endif %}
+              {% endfor %}
+
+              {% for tx in txs %}
+              {% set is_in = (in_id is not none and tx.category_id == in_id) %}
+              {% set is_out = (out_id is not none and tx.category_id == out_id) %}
+              <tr>
+                <td>{{ tx.tx_date or tx.date }}</td>
+                <td>{{ group_map.get(tx.group_id, '-') }}</td>
+                <td>
+                  {% if is_in %}
+                    <span class="badge text-bg-success">Entrada</span>
+                  {% elif is_out %}
+                    <span class="badge text-bg-danger">Saída</span>
+                  {% else %}
+                    <span class="badge text-bg-secondary">—</span>
+                  {% endif %}
+                </td>
+                <td class="text-end {% if is_in %}text-success{% elif is_out %}text-danger{% endif %}">
+                  R$ {{ "%.2f"|format(tx.amount) }}
+                </td>
+                <td>{{ tx.description or "" }}</td>
+                <td class="text-end">
+                  <button
+                    type="button"
+                    class="btn btn-sm btn-outline-danger"
+                    data-bs-toggle="modal"
+                    data-bs-target="#deleteTxModal"
+                    data-tx-id="{{ tx.id }}"
+                    data-tx-desc="{{ (tx.description or '') | e }}"
+                  >
+                    Excluir
+                  </button>
+                </td>
+              </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        {% else %}
+          <p class="text-muted mb-0">Nenhum lançamento ainda.</p>
+        {% endif %}
+      </div>
     </div>
   </div>
 </div>
 
-<script src="/static/js/transactions.js"></script>
+<!-- Modal de confirmação de exclusão -->
+<div class="modal fade" id="deleteTxModal" tabindex="-1" aria-labelledby="deleteTxLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <form method="post" id="deleteTxForm">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h5 class="modal-title h6" id="deleteTxLabel">Excluir transação</h5>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+        </div>
+        <div class="modal-body">
+          <p class="mb-0">Tem certeza que deseja excluir esta transação?</p>
+          <small class="text-muted" id="deleteTxDesc"></small>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
+          <button type="submit" class="btn btn-danger">Excluir</button>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function () {
+  const modalEl = document.getElementById('deleteTxModal');
+  const formEl  = document.getElementById('deleteTxForm');
+  const descEl  = document.getElementById('deleteTxDesc');
+
+  if (!modalEl || !formEl) return;
+
+  modalEl.addEventListener('show.bs.modal', function (event) {
+    const button = event.relatedTarget;
+    const txId   = button?.getAttribute('data-tx-id');
+    const txDesc = button?.getAttribute('data-tx-desc') || '';
+
+    // Define a action do form para POST correto
+    formEl.setAttribute('action', /transactions/delete/${txId});
+    descEl.textContent = txDesc ? Descrição: ${txDesc} : '';
+  });
+})();
+</script>
 {% endblock %}
