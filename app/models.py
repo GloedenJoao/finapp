@@ -1,46 +1,47 @@
+# app/models.py
+from datetime import datetime, date
 from typing import Optional
 from sqlmodel import SQLModel, Field
-from datetime import date
-from sqlalchemy import Column
-from sqlalchemy.types import Date as SA_Date
 
-# ---------- Usuário ----------
+
 class User(SQLModel, table=True):
+    _tablename_ = "user"
+
     id: Optional[int] = Field(default=None, primary_key=True)
-    email: str = Field(index=True, unique=True)
+    email: str = Field(index=True)  # opcional: unique via migração/constraint
     password_hash: str
+    created_at: datetime = Field(default_factory=datetime.utcnow, nullable=False)
 
-# ---------- Conta (LEGADO) ----------
-class Account(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    user_id: int = Field(index=True)
-    name: str
-    type: Optional[str] = None
-    currency: Optional[str] = None
 
-# ---------- Categoria ----------
-class Category(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
-    user_id: int = Field(index=True)
-    name: str
-    kind: str  # "in" ou "out"
-
-# ---------- Grupo ----------
 class Group(SQLModel, table=True):
+    _tablename_ = "group"
+
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(index=True)
-    name: str = Field(index=True)
+    name: str
 
-# ---------- Transação ----------
+
+class Category(SQLModel, table=True):
+    _tablename_ = "category"
+
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    name: str
+    # valores esperados: "in" ou "out"
+    kind: str = Field(description="in or out")
+
+
 class Transaction(SQLModel, table=True):
+    _tablename_ = "transaction"
+
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(index=True)
+
     amount: float
+    tx_date: date = Field(index=True)  # <- seu main.py usa tx_date
 
-    # atributo Python tx_date; coluna no banco continua "date"
-    tx_date: date = Field(sa_column=Column("date", SA_Date, index=True))
+    group_id: Optional[int] = Field(default=None, index=True)
+    account_id: Optional[int] = Field(default=None, index=True)
 
-    group_id: Optional[int] = Field(default=None, index=True)  # <- NOVO
-    account_id: Optional[int] = Field(default=None, index=True)  # legado
     category_id: int = Field(index=True)
-    description: Optional[str] = None
+    description: Optional[str] = Field(default=None)

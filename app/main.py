@@ -1,5 +1,5 @@
+# app/main.py
 from datetime import datetime, timedelta, date
-from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 from typing import List as TList
 
@@ -15,14 +15,18 @@ from sqlmodel import Session, select
 from .db import engine, init_db
 from .models import User, Category, Transaction, Group
 
-# ---- Config ----
+# -----------------------------
+# Config
+# -----------------------------
 SECRET = "CHANGE_ME_TO_A_LONG_RANDOM_SECRET"
 ALGO = "HS256"
 TOKEN_MINUTES = 60
 
 PWD = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-# ---- App & Templates ----
+# -----------------------------
+# App & Templates
+# -----------------------------
 app = FastAPI()
 
 TEMPLATE_DIR = "app/templates"
@@ -30,16 +34,20 @@ STATIC_DIR = "app/static"
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 templates = Environment(loader=FileSystemLoader(TEMPLATE_DIR))
+
+
 def render(name: str, **ctx) -> HTMLResponse:
     tpl = templates.get_template(name)
     return HTMLResponse(tpl.render(**ctx))
 
-# =========================
+
+# -----------------------------
 # Helpers: Auth
-# =========================
+# -----------------------------
 def make_token(user_id: int, minutes: int = TOKEN_MINUTES) -> str:
     payload = {"sub": str(user_id), "exp": datetime.utcnow() + timedelta(minutes=minutes)}
     return jwt.encode(payload, SECRET, algorithm=ALGO)
+
 
 def get_current_user_id(request: Request) -> Optional[int]:
     token = request.cookies.get("access_token")
@@ -53,17 +61,20 @@ def get_current_user_id(request: Request) -> Optional[int]:
     except Exception:
         return None
 
+
 def require_user(request: Request) -> int:
     uid = get_current_user_id(request)
     if not uid:
         raise HTTPException(status_code=401, detail="Login required")
     return uid
 
-# =========================
+
+# -----------------------------
 # Helpers: Datas
-# =========================
+# -----------------------------
 def today_date() -> date:
     return datetime.utcnow().date()
+
 
 def parse_date_yyyy_mm_dd(s: Optional[str]) -> Optional[date]:
     if not s:
@@ -72,6 +83,7 @@ def parse_date_yyyy_mm_dd(s: Optional[str]) -> Optional[date]:
         return date.fromisoformat(s)
     except Exception:
         return None
+
 
 def month_bounds() -> Tuple[date, date, str]:
     today = today_date()
@@ -82,10 +94,12 @@ def month_bounds() -> Tuple[date, date, str]:
         next_month_first = first_day.replace(month=first_day.month + 1)
     return first_day, next_month_first, first_day.strftime("%Y-%m")
 
-# =========================
+
+# -----------------------------
 # Tipos (Entrada/Saída)
-# =========================
+# -----------------------------
 def normalize_types(uid: int) -> None:
+    """Garante que existam categorias 'Entrada' (in) e 'Saída' (out) e migra duplicadas."""
     with Session(engine) as s:
         cats = s.exec(select(Category).where(Category.user_id == uid)).all()
         changed = False
@@ -137,12 +151,14 @@ def normalize_types(uid: int) -> None:
         if need_commit:
             s.commit()
 
-# =========================
+
+# -----------------------------
 # Grupos
-# =========================
+# -----------------------------
 def get_user_groups(uid: int) -> List[Group]:
     with Session(engine) as s:
         return s.exec(select(Group).where(Group.user_id == uid).order_by(Group.name.asc())).all()
+
 
 def ensure_default_group(uid: int) -> Group:
     with Session(engine) as s:
@@ -153,19 +169,22 @@ def ensure_default_group(uid: int) -> Group:
         s.add(g); s.commit(); s.refresh(g)
         return g
 
-# =========================
-# Migração em runtime (idempotente)
-# =========================
+
+# -----------------------------
+# Migrações em runtime (SQLite)
+# -----------------------------
 def _column_exists(session: Session, table: str, col: str) -> bool:
     rows = session.exec(text(f"PRAGMA table_info('{table}')")).all()
     names = {r[1] for r in rows}
     return col in names
 
+
 def _pragma_table_info(session: Session, table: str):
     return session.exec(text(f"PRAGMA table_info('{table}')")).all()
 
+
 def _rebuild_transaction_table_if_needed():
-    """Se 'account_id' estiver NOT NULL, recria a tabela 'transaction' com account_id NULL (mantém dados)."""
+    """Se 'account_id' estiver NOT NULL, recria a tabela 'transaction' permitindo NULL."""
     with Session(engine) as s:
         cols = _pragma_table_info(s, "transaction")
         if not cols:
@@ -186,23 +205,64 @@ def _rebuild_transaction_table_if_needed():
                 amount REAL NOT NULL,
                 date DATE,
                 group_id INTEGER,
-                account_id INTEGER,            -- agora permite NULL
+                account_id INTEGER,
                 category_id INTEGER NOT NULL,
-                description TEXT
+                description TEXT,
+                tx_date DATE
             )
         """))
         s.exec(text("""
-            INSERT INTO transaction_new (id, user_id, amount, date, group_id, account_id, category_id, description)
-            SELECT id, user_id, amount, date, group_id, account_id, category_id, description
+            INSERT INTO transaction_new (id, user_id, amount, date, group_id, account_id, category_id, description, tx_date)
+            SELECT id, user_id, amount, date, group_id, account_id, category_id, description, tx_date
             FROM "transaction"
         """))
         s.exec(text('DROP TABLE "transaction"'))
         s.exec(text('ALTER TABLE transaction_new RENAME TO "transaction"'))
         s.exec(text('CREATE INDEX IF NOT EXISTS ix_transaction_user_id ON "transaction"(user_id)'))
         s.exec(text('CREATE INDEX IF NOT EXISTS ix_transaction_date ON "transaction"(date)'))
+        s.exec(text('CREATE INDEX IF NOT EXISTS ix_transaction_tx_date ON "transaction"(tx_date)'))
         s.exec(text('CREATE INDEX IF NOT EXISTS ix_transaction_group_id ON "transaction"(group_id)'))
         s.exec(text('CREATE INDEX IF NOT EXISTS ix_transaction_category_id ON "transaction"(category_id)'))
         s.exec(text("COMMIT"))
+
+
+def _runtime_migrate_users():
+    with Session(engine) as s:
+        cols = s.exec(text("PRAGMA table_info('user')")).all()
+        colnames = {r[1] for r in cols}
+        if "created_at" not in colnames:
+            s.exec(text("ALTER TABLE 'user' ADD COLUMN created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"))
+            s.commit()
+        else:
+            s.exec(text("UPDATE 'user' SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP)"))
+            s.commit()
+
+
+def _ensure_tx_date_column():
+    """Garante que a coluna tx_date exista e copie valores da coluna antiga 'date' se houver."""
+    with Session(engine) as s:
+        cols = s.exec(text("PRAGMA table_info('transaction')")).all()
+        names = {r[1] for r in cols}
+
+        if "tx_date" not in names:
+            s.exec(text("ALTER TABLE 'transaction' ADD COLUMN tx_date DATE"))
+            if "date" in names:
+                s.exec(text("""
+                    UPDATE 'transaction'
+                    SET tx_date = date
+                    WHERE tx_date IS NULL AND date IS NOT NULL
+                """))
+            s.exec(text("CREATE INDEX IF NOT EXISTS ix_transaction_tx_date ON 'transaction'(tx_date)"))
+            s.commit()
+        else:
+            if "date" in names:
+                s.exec(text("""
+                    UPDATE 'transaction'
+                    SET tx_date = date
+                    WHERE tx_date IS NULL AND date IS NOT NULL
+                """))
+                s.commit()
+
 
 def _runtime_migrate_groups():
     # cria tabelas que faltam
@@ -214,7 +274,7 @@ def _runtime_migrate_groups():
             s.exec(text("ALTER TABLE 'transaction' ADD COLUMN group_id INTEGER"))
             s.commit()
 
-    # garante que account_id aceite NULL (se necessário, reconstrói a tabela)
+    # garante account_id NULLABLE se necessário (reconstrói a tabela)
     _rebuild_transaction_table_if_needed()
 
     # cria grupo padrão e backfill de group_id
@@ -231,9 +291,10 @@ def _runtime_migrate_groups():
             )
             s.commit()
 
-# =========================
+
+# -----------------------------
 # Resumos
-# =========================
+# -----------------------------
 def monthly_summary_by_group(uid: int) -> Tuple[List[Dict], Dict[str, float]]:
     """
     (groups_list, totals) para o MÊS ATUAL.
@@ -264,7 +325,6 @@ def monthly_summary_by_group(uid: int) -> Tuple[List[Dict], Dict[str, float]]:
         )
         rows = list(s.exec(stmt).all())
 
-    # Totais gerais
     totals = {"in": 0.0, "out": 0.0, "net": 0.0}
     for gid, kind, amount in rows:
         amt = float(amount or 0.0)
@@ -272,7 +332,6 @@ def monthly_summary_by_group(uid: int) -> Tuple[List[Dict], Dict[str, float]]:
         else:            totals["out"] += amt
     totals["net"] = totals["in"] - totals["out"]
 
-    # Por grupo (ignora gid None)
     name_by_gid = {g.id: g.name for g in groups}
     agg: Dict[int, Dict[str, float]] = {}
     for gid, kind, amount in rows:
@@ -289,12 +348,12 @@ def monthly_summary_by_group(uid: int) -> Tuple[List[Dict], Dict[str, float]]:
 
     return groups_list, totals
 
+
 def daily_series_by_group(uid: int, start: date, end_inclusive: date) -> List[Dict]:
     """
     Série diária:
       - day: "YYYY-MM-DD"
       - rows: [{group, in, out, net, balance}] (balance = acumulado até o dia)
-    Se não houver grupos, retorna uma única linha "Total" por dia.
     """
     normalize_types(uid)
     groups = get_user_groups(uid)
@@ -329,7 +388,6 @@ def daily_series_by_group(uid: int, start: date, end_inclusive: date) -> List[Di
         cur += timedelta(days=1)
 
     if len(groups) == 0:
-        # Sem grupos: colapsa tudo por dia em "Total"
         per_day = {d: {"in": 0.0, "out": 0.0} for d in all_days}
         for d, gid, kind, amount in rows:
             per_day[d][kind] += float(amount or 0.0)
@@ -350,7 +408,6 @@ def daily_series_by_group(uid: int, start: date, end_inclusive: date) -> List[Di
             })
         return result_rows
 
-    # Com grupos
     name_by_gid = {g.id: g.name for g in groups}
     gids = list(name_by_gid.keys())
 
@@ -378,61 +435,7 @@ def daily_series_by_group(uid: int, start: date, end_inclusive: date) -> List[Di
         result_rows.append({"day": d.isoformat(), "rows": day_rows})
     return result_rows
 
-# =========================
-# Dash: saldo por grupo (pie)
-# =========================
-def balances_by_group_at(uid: int, target: date):
-    """Retorna listas (labels, values) com saldo (in - out) por grupo até 'target' (inclusive).
-       Somente grupos com saldo > 0 vão para o pie (distribuição de ativos)."""
-    normalize_types(uid)
-    groups = get_user_groups(uid)
-    name_by_gid = {g.id: g.name for g in groups}
 
-    if not groups:
-        return [], []
-
-    with Session(engine) as s:
-        stmt = (
-            select(
-                Transaction.group_id,
-                Category.kind,
-                func.coalesce(func.sum(Transaction.amount), 0.0),
-            )
-            .select_from(Transaction)
-            .join(Category, Category.id == Transaction.category_id)
-            .where(
-                Transaction.user_id == uid,
-                Transaction.tx_date <= target,
-                Category.kind.in_(("in", "out")),
-            )
-            .group_by(Transaction.group_id, Category.kind)
-        )
-        rows = list(s.exec(stmt).all())
-
-    sums = {gid: {"in": 0.0, "out": 0.0} for gid in name_by_gid}
-    for gid, kind, amount in rows:
-        if gid in sums:
-            sums[gid][kind] += float(amount or 0.0)
-
-    labels, values = [], []
-    for gid, io in sums.items():
-        net = io["in"] - io["out"]
-        if net > 0:
-            labels.append(name_by_gid[gid])
-            values.append(net)
-
-    return labels, values
-
-# =========================
-# Startup
-# =========================
-@app.on_event("startup")
-def on_startup():
-    _runtime_migrate_groups()
-
-# =========================
-# Home (dashboard) — com filtro por grupos (gf)
-# =========================
 def _prune_empty_days(day_rows: List[Dict]) -> List[Dict]:
     """Mantém apenas os dias em que há alguma movimentação (in/out > 0)."""
     pruned = []
@@ -443,12 +446,26 @@ def _prune_empty_days(day_rows: List[Dict]) -> List[Dict]:
             pruned.append(d)
     return pruned
 
+
+# -----------------------------
+# Startup
+# -----------------------------
+@app.on_event("startup")
+def on_startup():
+    _runtime_migrate_groups()
+    _runtime_migrate_users()
+    _ensure_tx_date_column()
+
+
+# -----------------------------
+# Home (dashboard)
+# -----------------------------
 @app.get("/", response_class=HTMLResponse)
 def home(
     request: Request,
     start: Optional[str] = Query(default=None),
     end: Optional[str] = Query(default=None),
-    gf: Optional[TList[str]] = Query(default=None),
+    gf: Optional[TList[str]] = Query(default=None),  # filtro por grupos
 ):
     uid = get_current_user_id(request)
 
@@ -469,7 +486,7 @@ def home(
             default_group_id=None,
         )
 
-    # Garante grupo padrão e carrega opções (em formato plano)
+    # Garante grupo padrão e carrega opções
     default_group = ensure_default_group(uid)
     groups_orm = get_user_groups(uid) or [default_group]
     group_options = [{"id": g.id, "name": g.name} for g in groups_orm]
@@ -483,7 +500,7 @@ def home(
     default_start = first_day
     default_end = next_month_first - timedelta(days=1)
     start_date = parse_date_yyyy_mm_dd(start) or default_start
-    end_date   = parse_date_yyyy_mm_dd(end)   or default_end
+    end_date = parse_date_yyyy_mm_dd(end) or default_end
     if end_date < start_date:
         end_date = start_date
 
@@ -495,15 +512,13 @@ def home(
 
     # Aplica filtro
     if not gf_list or "all" in gf_set:
-        # Todos os grupos
         filtered = full_day_rows
         gf_label = "Todos os grupos"
     elif "total" in gf_set and len(gf_set) == 1:
-        # Total (colapsa por dia)
         filtered = []
         running = 0.0
         for d in full_day_rows:
-            inc = sum(r["in"]  for r in d["rows"])
+            inc = sum(r["in"] for r in d["rows"])
             out = sum(r["out"] for r in d["rows"])
             net = inc - out
             running += net
@@ -532,10 +547,8 @@ def home(
             out_rows: TList[Dict] = []
             for d in full_day_rows:
                 rows = [r for r in d["rows"] if r["group"] in selected_names]
-                # Garante pelo menos zeros para cada grupo selecionado que não teve movimento no dia
                 existing_names = {r["group"] for r in rows}
-                for name in sorted(selected_names - existing_names):
-                    # saldo acumulado preserva do dia anterior se existia; se não, inicia 0
+                for name in selected_names - existing_names:
                     prev_balance = 0.0
                     if out_rows:
                         for prev in reversed(out_rows):
@@ -549,20 +562,17 @@ def home(
             gf_label = ", ".join(sorted(selected_names))
             filtered = out_rows
 
-    # ... após calcular 'filtered' com base em gf ...
-
-    # ➜ mantém só dias com movimento
+    # Mantém apenas dias com movimento
     display_rows = _prune_empty_days(filtered)
-    
 
-    return render( 
+    return render(
         "home.html",
         title="FinApp",
         user_id=uid,
         month=month_label,
         groups=groups_list,
         totals=totals,
-        day_rows=display_rows,             # <-- agora vai só com dias que têm movimento
+        day_rows=display_rows,
         start_val=start_date.isoformat(),
         end_val=end_date.isoformat(),
         gf=gf_list,
@@ -571,15 +581,17 @@ def home(
         default_group_id=default_group.id,
     )
 
-# =========================
+
+# -----------------------------
 # Auth
-# =========================
+# -----------------------------
 @app.get("/login", response_class=HTMLResponse)
 def login_get(request: Request):
     uid = get_current_user_id(request)
     if uid:
         return RedirectResponse("/", status_code=302)
     return render("login.html", title="Sign in")
+
 
 @app.post("/login")
 def login_post(email: str = Form(), password: str = Form()):
@@ -589,8 +601,9 @@ def login_post(email: str = Form(), password: str = Form()):
             raise HTTPException(status_code=401, detail="Invalid credentials")
         token = make_token(user.id)
     resp = RedirectResponse("/", status_code=302)
-    resp.set_cookie("access_token", token, httponly=True, secure=False)  # secure=True em produção/HTTPS
+    resp.set_cookie("access_token", token, httponly=True, secure=False)
     return resp
+
 
 @app.get("/signup", response_class=HTMLResponse)
 def signup_get(request: Request):
@@ -599,18 +612,24 @@ def signup_get(request: Request):
         return RedirectResponse("/", status_code=302)
     return render("signup.html", title="Create account")
 
+
 @app.post("/signup")
 def signup_post(email: str = Form(), password: str = Form()):
     with Session(engine) as s:
         exists = s.exec(select(User).where(User.email == email)).first()
         if exists:
             raise HTTPException(status_code=400, detail="Email already registered")
-        user = User(email=email, password_hash=PWD.hash(password))
+        user = User(
+            email=email,
+            password_hash=PWD.hash(password),
+            created_at=datetime.utcnow(),
+        )
         s.add(user); s.commit(); s.refresh(user)
         token = make_token(user.id)
     resp = RedirectResponse("/", status_code=302)
     resp.set_cookie("access_token", token, httponly=True, secure=False)
     return resp
+
 
 @app.get("/logout")
 def logout():
@@ -618,58 +637,58 @@ def logout():
     resp.delete_cookie("access_token")
     return resp
 
-# =========================
-# Groups (CRUD simples)
-# =========================
+
+# -----------------------------
+# Grupos
+# -----------------------------
 @app.get("/groups", response_class=HTMLResponse)
 def groups_page(request: Request):
     uid = require_user(request)
     groups = get_user_groups(uid)
-    return render(
-        "groups.html",
-        title="Grupos",
-        user_id=uid,
-        groups=groups,
-    )
+    return render("groups.html", title="Grupos", user_id=uid, groups=groups)
+
 
 @app.post("/groups/new")
 def groups_new(request: Request, name: str = Form(...)):
     uid = require_user(request)
-    name = (name or "").strip()
-    if not name:
-        raise HTTPException(status_code=400, detail="Nome obrigatório")
     with Session(engine) as s:
-        g = Group(user_id=uid, name=name)
+        g = Group(name=name, user_id=uid)
         s.add(g); s.commit()
     return RedirectResponse("/groups", status_code=303)
+
 
 @app.post("/groups/delete/{gid}")
 def groups_delete(request: Request, gid: int):
     uid = require_user(request)
     with Session(engine) as s:
-        g = s.exec(select(Group).where(Group.id == gid, Group.user_id == uid)).first()
-        if g:
+        g = s.get(Group, gid)
+        if g and g.user_id == uid:
             s.delete(g); s.commit()
     return RedirectResponse("/groups", status_code=303)
 
-@app.post("/groups/create")
-def groups_create_alias(request: Request, name: str = Form(...)):
-    return groups_new(request, name)
 
-# =========================
-# Transactions (usa Grupos)
-# =========================
+@app.get("/api/groups")
+def api_groups(request: Request):
+    uid = require_user(request)
+    groups = get_user_groups(uid)
+    return JSONResponse(
+        [{"id": g.id, "name": g.name} for g in groups],
+        headers={"Cache-Control": "no-store"}
+    )
+
+
+# -----------------------------
+# Transações
+# -----------------------------
 @app.get("/transactions", response_class=HTMLResponse)
 def transactions_page(request: Request):
     uid = require_user(request)
     normalize_types(uid)
-
     ensure_default_group(uid)
 
     with Session(engine) as s:
-        # Tipos: só 1 'in' e 1 'out' para o dropdown
         cat_all = s.exec(select(Category).where(Category.user_id == uid)).all()
-        cat_in  = next((c for c in cat_all if c.kind == "in"), None)
+        cat_in = next((c for c in cat_all if c.kind == "in"), None)
         cat_out = next((c for c in cat_all if c.kind == "out"), None)
         categories = [c for c in (cat_in, cat_out) if c]
 
@@ -687,12 +706,13 @@ def transactions_page(request: Request):
         "transactions.html",
         title="Transactions",
         user_id=uid,
-        groups=groups,                  # dropdown de grupos
-        categories=categories,          # Entrada/Saída
+        groups=groups,
+        categories=categories,
         txs=txs,
-        group_map=group_map,            # mostrar nome do grupo na lista
-        today=today_date().isoformat(), # pré-preencher data
+        group_map=group_map,
+        today=today_date().isoformat(),
     )
+
 
 @app.post("/transactions/new")
 def create_transaction(
@@ -712,14 +732,12 @@ def create_transaction(
     default_group = ensure_default_group(uid)
 
     with Session(engine) as s:
-        # validar tipo
         if category_id is None:
             raise HTTPException(status_code=400, detail="Tipo (Entrada/Saída) é obrigatório")
         cat = s.exec(select(Category).where(Category.id == category_id, Category.user_id == uid)).first()
         if not cat:
             raise HTTPException(status_code=400, detail="Tipo inválido")
 
-        # validar grupo (se enviado) ou usar padrão
         if group_id is not None:
             g = s.exec(select(Group).where(Group.id == group_id, Group.user_id == uid)).first()
             if not g:
@@ -739,7 +757,7 @@ def create_transaction(
         s.add(tx); s.commit()
     return RedirectResponse("/transactions", status_code=302)
 
-# POST (formulário)
+
 @app.post("/transactions/delete/{tx_id}")
 def delete_transaction_post(request: Request, tx_id: int):
     uid = require_user(request)
@@ -751,11 +769,10 @@ def delete_transaction_post(request: Request, tx_id: int):
             )
         ).first()
         if tx:
-            s.delete(tx)
-            s.commit()
+            s.delete(tx); s.commit()
     return RedirectResponse("/transactions", status_code=303)
 
-# GET (fallback, se navegador cair em /transactions/delete/123)
+
 @app.get("/transactions/delete/{tx_id}")
 def delete_transaction_get(request: Request, tx_id: int):
     uid = require_user(request)
@@ -767,39 +784,5 @@ def delete_transaction_get(request: Request, tx_id: int):
             )
         ).first()
         if tx:
-            s.delete(tx)
-            s.commit()
+            s.delete(tx); s.commit()
     return RedirectResponse("/transactions", status_code=303)
-
-# =========================
-# API auxiliar
-# =========================
-@app.get("/api/groups")
-def api_groups(request: Request):
-    uid = require_user(request)
-    groups = get_user_groups(uid)
-    return JSONResponse(
-        [{"id": g.id, "name": g.name} for g in groups],
-        headers={"Cache-Control": "no-store"}
-    )
-
-# =========================
-# Dash (rota)
-# =========================
-@app.get("/dash", response_class=HTMLResponse)
-def dash_page(request: Request, d: Optional[str] = Query(default=None)):
-    uid = get_current_user_id(request)
-    if not uid:
-        return RedirectResponse("/login", status_code=302)
-
-    target = parse_date_yyyy_mm_dd(d) or today_date()
-    labels, values = balances_by_group_at(uid, target)
-
-    return render(
-        "dash.html",
-        title="Dash",
-        user_id=uid,
-        target_val=target.isoformat(),
-        pie_labels=labels,
-        pie_values=values,
-    )
