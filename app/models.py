@@ -1,7 +1,7 @@
 # app/models.py
 from datetime import datetime, date
 from typing import Optional
-from sqlmodel import SQLModel, Field
+from sqlmodel import SQLModel, Field, Relationship, UniqueConstraint
 
 
 class User(SQLModel, table=True):
@@ -31,17 +31,37 @@ class Category(SQLModel, table=True):
     kind: str = Field(description="in or out")
 
 
-class Transaction(SQLModel, table=True):
-    _tablename_ = "transaction"
+# --- NOVO: saldo diário por grupo (ex.: Conta Corrente) ---
+class DayBalance(SQLModel, table=True):
+    __tablename__ = "day_balance"
+    __table_args__ = (
+        UniqueConstraint("user_id", "group_id", "day", name="uq_day_balance_user_group_day"),
+    )
 
     id: Optional[int] = Field(default=None, primary_key=True)
     user_id: int = Field(index=True)
+    group_id: int = Field(index=True)
+    day: date = Field(index=True)
+    balance: float  # em moeda (R$)
+    source: str = Field(default="itau")  # opcional: origem do saldo
 
-    amount: float
-    tx_date: date = Field(index=True)  # <- seu main.py usa tx_date
+# --- ALTERAÇÃO: transação com UID de deduplicação ---
+class Transaction(SQLModel, table=True):
+    __tablename__ = "transaction"
 
+    id: Optional[int] = Field(default=None, primary_key=True)
+    user_id: int = Field(index=True)
+    tx_date: date = Field(index=True)
     group_id: Optional[int] = Field(default=None, index=True)
-    account_id: Optional[int] = Field(default=None, index=True)
+    category_id: Optional[int] = Field(default=None, index=True)
+    amount: float
+    description: Optional[str] = ""
+    account_id: Optional[int] = None
 
-    category_id: int = Field(index=True)
-    description: Optional[str] = Field(default=None)
+    # NOVO: UID de deduplicação (ex.: hash "itau|2025-08-31|DESCR| -19,89")
+    tx_uid: Optional[str] = Field(default=None, index=True)
+
+    # constraint: (user_id, tx_uid) único quando tx_uid for preenchido
+    __table_args__ = (
+        UniqueConstraint("user_id", "tx_uid", name="uq_transaction_user_uid"),
+    )

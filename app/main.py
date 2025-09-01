@@ -12,8 +12,16 @@ from passlib.context import CryptContext
 from sqlalchemy import func, text, case
 from sqlmodel import Session, select
 
+# imports no topo de app/main.py
+from fastapi import UploadFile, File  # etc...
+import pdfplumber
+from decimal import Decimal
+import io            # <<< ADICIONE/MOVA PARA CÁ
+import re
+# from pypdf import PdfReader  # se estiver usando o fallback
+
 from .db import engine, init_db
-from .models import User, Category, Transaction, Group
+from .models import User, Category, Transaction, Group, DayBalance
 
 import json
 
@@ -282,6 +290,18 @@ def ensure_default_group(uid: int) -> Group:
         s.add(g); s.commit(); s.refresh(g)
         return g
 
+# -----------------------------
+# Helpers: Saldo (DayBalance)
+# -----------------------------
+def latest_balance_for(uid: int, group_id: int) -> Optional[float]:
+    """Retorna o saldo mais recente (DayBalance) para o grupo do usuário."""
+    with Session(engine) as s:
+        row = s.exec(
+            select(DayBalance)
+            .where(DayBalance.user_id == uid, DayBalance.group_id == group_id)
+            .order_by(DayBalance.day.desc())
+        ).first()
+        return float(row.balance) if row else None
 
 # -----------------------------
 # Migrações em runtime (SQLite)
@@ -349,6 +369,35 @@ def _runtime_migrate_users():
         else:
             s.exec(text("UPDATE 'user' SET created_at = COALESCE(created_at, CURRENT_TIMESTAMP)"))
             s.commit()
+
+def _ensure_tx_uid_column():
+    """
+    Garante a coluna transaction.tx_uid e o índice único (user_id, tx_uid) quando tx_uid não for NULL.
+    Não altera linhas existentes; deixa tx_uid como NULL para lançamentos antigos.
+    """
+    with Session(engine) as s:
+        cols = s.exec(text("PRAGMA table_info('transaction')")).all()
+        names = {r[1] for r in cols}
+
+        # 1) Cria a coluna se faltar
+        if "tx_uid" not in names:
+            s.exec(text("ALTER TABLE 'transaction' ADD COLUMN tx_uid TEXT"))
+            s.commit()
+
+        # 2) Índice (parcial) de unicidade, ignorando NULL (SQLite 3.8+)
+        #    -> evita duplicar importações; permite lançamentos manuais sem UID (NULL)
+        s.exec(text("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_transaction_user_uid
+            ON "transaction"(user_id, tx_uid)
+            WHERE tx_uid IS NOT NULL
+        """))
+        # Índice auxiliar para buscas diretas por tx_uid (opcional, mas útil)
+        s.exec(text("""
+            CREATE INDEX IF NOT EXISTS ix_transaction_tx_uid
+            ON "transaction"(tx_uid)
+        """))
+        s.commit()
+
 
 
 def _ensure_tx_date_column():
@@ -580,7 +629,7 @@ def on_startup():
     _runtime_migrate_groups()
     _runtime_migrate_users()
     _ensure_tx_date_column()
-
+    _ensure_tx_uid_column()
 
 # -----------------------------
 # Home (dashboard)
@@ -754,6 +803,24 @@ def signup_post(email: str = Form(), password: str = Form()):
     resp = RedirectResponse("/", status_code=302)
     resp.set_cookie("access_token", token, httponly=True, secure=False)
     return resp
+
+# helpers itau
+import hashlib
+import re
+
+def ensure_group(uid: int, name: str) -> Group:
+    with Session(engine) as s:
+        g = s.exec(select(Group).where(Group.user_id == uid, Group.name == name)).first()
+        if g:
+            return g
+        g = Group(user_id=uid, name=name)
+        s.add(g); s.commit(); s.refresh(g)
+        return g
+
+def build_itau_uid(dt: date, desc: str, amount: float) -> str:
+    # UID estável por origem: "itau|YYYY-MM-DD|DESC_NORMALIZADA|{amount:.2f}"
+    key = f"itau|{dt.isoformat()}|{(desc or '').strip()}|{amount:.2f}"
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()
 
 # --- helper: saldo por grupo no dia (posição) ---
 from sqlalchemy import case
@@ -930,13 +997,20 @@ def api_groups(request: Request):
 # -----------------------------
 # Transações
 # -----------------------------
+from collections import defaultdict
+from sqlalchemy import text
+from sqlmodel import select
+
 @app.get("/transactions", response_class=HTMLResponse)
 def transactions_page(request: Request):
     uid = require_user(request)
     ensure_default_group(uid)
 
-    # Garante que existam as categorias Entrada/Saída e pega seus IDs
     cat_in, cat_out, categories = get_or_create_in_out_categories(uid)
+
+    imp = int(request.query_params.get("imported", 0) or 0)
+    skp = int(request.query_params.get("skipped", 0) or 0)
+    bal = int(request.query_params.get("balances", 0) or 0)
 
     with Session(engine) as s:
         groups = get_user_groups(uid)
@@ -947,19 +1021,67 @@ def transactions_page(request: Request):
         ).all()
         group_map = {g.id: g.name for g in groups}
 
+    # agrupa por dia
+    by_day = defaultdict(list)
+    for tx in txs:
+        d = getattr(tx, "tx_date", None) or getattr(tx, "date", None)
+        by_day[d].append(tx)
+
+    txs_grouped = []
+    for d in sorted(by_day.keys(), reverse=True):
+        txs_grouped.append(
+            (d, sorted(by_day[d], key=lambda t: (t.tx_date, t.id), reverse=True))
+        )
+    # Depois de preparar 'txs_grouped'
+    conta_corrente = ensure_group(uid, "Conta Corrente")
+    days = [d for d, _ in txs_grouped if d is not None]
+    day_balances = {}
+    if days:
+        with Session(engine) as s:
+            rows = s.exec(
+                select(DayBalance.day, DayBalance.balance).where(
+                    DayBalance.user_id == uid,
+                    DayBalance.group_id == conta_corrente.id,
+                    DayBalance.day.in_(days)
+                )
+            ).all()
+            for day, balance in rows:
+                day_balances[day.isoformat()] = float(balance or 0.0)
+
+    # >>> NOVO: buscar saldo do dia (DayBalance) para "Conta Corrente"
+    conta_corrente = ensure_group(uid, "Conta Corrente")
+    days = [d for d, _ in txs_grouped if d is not None]
+    day_balances = {}
+    if days:
+        with Session(engine) as s:
+            rows = s.exec(
+                select(DayBalance.day, DayBalance.balance).where(
+                    DayBalance.user_id == uid,
+                    DayBalance.group_id == conta_corrente.id,
+                    DayBalance.day.in_(days)
+                )
+            ).all()
+            # usa chave string (ISO) para evitar problemas de comparação no template
+            for day, balance in rows:
+                day_balances[day.isoformat()] = float(balance or 0.0)
+
     return render(
         "transactions.html",
         title="Transactions",
         user_id=uid,
         groups=groups,
-        categories=categories,              # pode manter se quiser, mas não vamos depender disso
-        txs=txs,
+        categories=categories,
+        txs_grouped=txs_grouped,
         group_map=group_map,
         today=today_date().isoformat(),
-        cat_in_id=cat_in.id,                # >>> ADICIONADO
-        cat_out_id=cat_out.id,              # >>> ADICIONADO
+        cat_in_id=cat_in.id,
+        cat_out_id=cat_out.id,
+        imported=imp,
+        skipped=skp,
+        balances=bal,
+        day_balances=day_balances,   # <<< passa para o template
+        
     )
-
 
 
 
@@ -1044,3 +1166,225 @@ def delete_transaction_get(request: Request, tx_id: int):
         if tx:
             s.delete(tx); s.commit()
     return RedirectResponse("/transactions", status_code=303)
+
+@app.post("/transactions/delete-all")
+def delete_all_transactions(request: Request):
+    """Remove all transactions belonging to the current user."""
+    uid = require_user(request)
+    with Session(engine) as s:
+        # Fetch all transactions for this user
+        user_txs = s.exec(
+            select(Transaction).where(Transaction.user_id == uid)
+        ).all()
+
+        for tx in user_txs:
+            s.delete(tx)
+        s.commit()
+
+    # Redirect back to the transactions page
+    return RedirectResponse("/transactions", status_code=303)
+
+# ================================
+# IMPORTAÇÃO ITAÚ (PDF) — PYTHON 3.8
+# ================================
+from fastapi import UploadFile, File, Form, HTTPException, Request
+from fastapi.responses import RedirectResponse
+from sqlmodel import Session, select
+from decimal import Decimal
+from typing import Optional, List
+from datetime import date as _date, datetime as _dt
+import hashlib
+import pdfplumber
+from pypdf import PdfReader
+import io
+import re
+
+# --- Regex e parsers ---
+_MONEY_RE = re.compile(r"^-?\d{1,3}(?:\.\d{3})*,\d{2}$")  # "1.234,56" / "-19,89"
+_LINE_DATE = re.compile(r"^(\d{2}/\d{2}/\d{4}|\d{2}/\d{2}/\d{2}|\d{2}/\d{2})\b")
+_TIME_RE  = re.compile(r"\b([01]\d|2[0-3]):[0-5]\d\b")     # HH:MM (24h)
+
+def parse_brl_money(s: str) -> float:
+    s = s.strip().replace(".", "").replace(",", ".")
+    return float(Decimal(s))
+
+def _safe_parse_pt_date(s: str) -> _date:
+    s = s.strip()
+    for fmt in ("%d/%m/%Y", "%d/%m/%y"):
+        try:
+            return _dt.strptime(s, fmt).date()
+        except Exception:
+            pass
+    try:
+        d, m = s.split("/")
+        return _date(today_date().year, int(m), int(d))
+    except Exception:
+        return today_date()
+
+# --- UID helpers (com hora e legado) ---
+def build_itau_uid(d: _date, time_str: Optional[str], desc: str, amount: float) -> str:
+    t = (time_str or "00:00").strip()
+    key = f"itau|{d.isoformat()}|{t}|{(desc or '').strip()}|{amount:.2f}"
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()
+
+def build_itau_uid_legacy(d: _date, desc: str, amount: float) -> str:
+    key = f"itau|{d.isoformat()}|{(desc or '').strip()}|{amount:.2f}"
+    return hashlib.sha1(key.encode("utf-8")).hexdigest()
+
+# Se seu projeto tem DayBalance, importe do seu models:
+# from .models import DayBalance, Transaction, Group, Category
+# E já existem: require_user, ensure_group, get_or_create_in_out_categories, today_date, engine
+
+@app.post("/transactions/import/itau-pdf")
+def import_itau_pdf(
+    request: Request,
+    file: UploadFile = File(...),
+    password: Optional[str] = Form(default=None),
+):
+    uid = require_user(request)
+
+    # garante grupo e categorias
+    conta_corrente = ensure_group(uid, "Conta Corrente")
+    cat_in, cat_out, _ = get_or_create_in_out_categories(uid)
+
+    content = file.file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Arquivo vazio")
+
+    lines: List[str] = []
+    pdf_error: Optional[Exception] = None
+
+    # 1) tentar com pdfplumber
+    try:
+        with pdfplumber.open(io.BytesIO(content)) as pdf:
+            for page in pdf.pages:
+                txt = page.extract_text() or ""
+                if txt:
+                    lines.extend([ln.strip() for ln in txt.splitlines() if ln.strip()])
+    except Exception as e:
+        pdf_error = e
+        print("ERRO pdfplumber:", type(e).__name__, e)
+
+    # 2) fallback pypdf (com decrypt se necessário)
+    if not lines:
+        try:
+            reader = PdfReader(io.BytesIO(content))
+            if reader.is_encrypted:
+                if not password:
+                    raise HTTPException(status_code=400, detail="PDF protegido por senha. Informe a senha.")
+                ok = reader.decrypt(password)
+                if not ok:
+                    raise HTTPException(status_code=400, detail="Senha do PDF inválida.")
+
+            for page in reader.pages:
+                txt = page.extract_text() or ""
+                if txt:
+                    lines.extend([ln.strip() for ln in txt.splitlines() if ln.strip()])
+        except HTTPException:
+            raise
+        except Exception as e2:
+            print("ERRO pypdf:", type(e2).__name__, e2)
+            msg = "Não foi possível ler o PDF"
+            if pdf_error:
+                msg += f" (pdfplumber: {type(pdf_error).__name__}; pypdf: {type(e2).__name__})"
+            raise HTTPException(status_code=400, detail=msg)
+
+    if not lines:
+        raise HTTPException(status_code=400, detail="Não foi possível extrair texto do PDF (pode ser somente imagem).")
+
+    imported = 0
+    skipped = 0
+    balances_upserted = 0
+
+    with Session(engine) as s:
+        for ln in lines:
+            # --- SALDO DO DIA ---
+            if "SALDO DO DIA" in ln:
+                parts = ln.split()
+                if parts and _LINE_DATE.match(parts[0]):
+                    d = _safe_parse_pt_date(parts[0])
+                    money_tok = None
+                    for tok in reversed(parts):
+                        if _MONEY_RE.match(tok):
+                            money_tok = tok
+                            break
+                    if money_tok:
+                        balance = parse_brl_money(money_tok)
+                        # upsert de saldo diário (ajuste ao seu model DayBalance)
+                        dbal = s.exec(
+                            select(DayBalance).where(
+                                DayBalance.user_id == uid,
+                                DayBalance.group_id == conta_corrente.id,
+                                DayBalance.day == d
+                            )
+                        ).first()
+                        if dbal:
+                            if float(dbal.balance) != balance:
+                                dbal.balance = balance
+                                s.add(dbal); s.commit()
+                            balances_upserted += 1
+                        else:
+                            s.add(DayBalance(
+                                user_id=uid, group_id=conta_corrente.id,
+                                day=d, balance=balance, source="itau"
+                            ))
+                            s.commit()
+                            balances_upserted += 1
+                continue  # não é transação
+
+            # --- LINHA DE TRANSAÇÃO ---
+            tokens = ln.split()
+            if not tokens or not _LINE_DATE.match(tokens[0]):
+                continue
+
+            raw_amount = tokens[-1]
+            if not _MONEY_RE.match(raw_amount):
+                continue
+
+            amount = parse_brl_money(raw_amount)
+
+            # (3) EXTRAÇÃO DE HORA E DESCRIÇÃO
+            mid_tokens = tokens[1:-1]  # entre data e valor
+            time_tok: Optional[str] = None
+            for tok in mid_tokens:
+                if _TIME_RE.fullmatch(tok):
+                    time_tok = tok
+                    break
+
+            desc_tokens = [t for t in mid_tokens if t != time_tok]
+            desc = " ".join(desc_tokens).strip()
+
+            d = _safe_parse_pt_date(tokens[0])
+            cat_id = cat_in.id if amount >= 0 else cat_out.id
+
+            # UID novo (com hora) + legado (sem hora) para compatibilidade
+            new_uid = build_itau_uid(d, time_tok, desc, amount)
+            old_uid = build_itau_uid_legacy(d, desc, amount)
+
+            existing = s.exec(
+                select(Transaction).where(
+                    Transaction.user_id == uid,
+                    Transaction.tx_uid.in_([new_uid, old_uid])
+                )
+            ).first()
+            if existing:
+                skipped += 1
+                continue
+
+            tx = Transaction(
+                user_id=uid,
+                tx_date=d,
+                group_id=conta_corrente.id,
+                category_id=cat_id,
+                amount=amount,
+                description=desc,
+                account_id=None,
+                tx_uid=new_uid
+            )
+            s.add(tx); s.commit()
+            imported += 1
+
+    return RedirectResponse(
+        url=f"/transactions?imported={imported}&skipped={skipped}&balances={balances_upserted}",
+        status_code=303
+    )

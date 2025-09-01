@@ -1,186 +1,157 @@
 {% extends "base.html" %}
+
 {% block content %}
+<div class="container py-4">
+  
+  <!-- Título e botão Excluir todas -->
+  <div class="d-flex align-items-center justify-content-between mb-4">
+    <h1 class="h3 mb-0">Lançamentos recentes</h1>
+    <button class="btn btn-outline-danger" data-bs-toggle="modal" data-bs-target="#confirmDeleteAll">Excluir todas</button>
+  </div>
 
-<div class="row g-3">
-  <!-- Formulário de lançamento -->
-  <div class="col-12 col-lg-5">
-    <div class="card w-100">
-      <div class="card-body">
-        <h2 class="h6 mb-3">Novo lançamento</h2>
+  <!-- Alert após importação -->
+  {% if imported or skipped or balances %}
+    <div class="alert alert-info shadow-sm mb-4">
+      <div>Importados: <strong>{{ imported }}</strong></div>
+      <div>Ignorados (duplicatas): <strong>{{ skipped }}</strong></div>
+      <div>Saldos diários atualizados: <strong>{{ balances }}</strong></div>
+    </div>
+  {% endif %}
 
-        <form action="/transactions/new" method="post" class="row g-3">
-          <!-- Data -->
-          <div class="col-12 col-md-6">
-            <label for="date" class="form-label small">Data</label>
-            <input type="date" id="date" name="date" class="form-control" value="{{ today }}" required>
-          </div>
+  <!-- Formulário: Importar extrato Itaú -->
+  <div class="card shadow-sm border-0 mb-4">
+    <div class="card-body">
+      <h2 class="h5 mb-3">Importar extrato bancário (PDF Itaú)</h2>
+      <form action="/transactions/import/itau-pdf" method="post" enctype="multipart/form-data" class="row g-3">
+        <div class="col-12 col-md-8">
+          <input type="file" name="file" accept="application/pdf" class="form-control" required>
+          <div class="form-text">Selecione o PDF. Duplicatas serão ignoradas automaticamente.</div>
+        </div>
+        <div class="col-12 col-md-4 d-grid d-md-flex align-items-start gap-2">
+          <button type="submit" class="btn btn-success">Importar PDF</button>
+        </div>
+      </form>
+    </div>
+  </div>
 
-          <!-- Valor -->
-          <div class="col-12 col-md-6">
-            <label for="amount" class="form-label small">Valor</label>
-            <div class="input-group">
-              <span class="input-group-text">R$</span>
-              <input type="number" step="0.01" min="0" id="amount" name="amount" class="form-control" placeholder="0.00" required inputmode="decimal">
+  <!-- Formulário: Novo lançamento manual -->
+  <div class="card shadow-sm border-0 mb-4">
+    <div class="card-body">
+      <h2 class="h5 mb-3">Novo lançamento</h2>
+      <form action="/transactions/new" method="post" class="row g-3">
+        <div class="col-12 col-md-3">
+          <label class="form-label">Data</label>
+          <input type="date" name="date" class="form-control" value="{{ today }}" required>
+        </div>
+        <div class="col-12 col-md-3">
+          <label class="form-label">Valor</label>
+          <input type="number" step="0.01" name="amount" class="form-control" placeholder="Ex.: -19.90" required>
+          <div class="form-text">Negativo = Saída; Positivo = Entrada</div>
+        </div>
+        <div class="col-12 col-md-3">
+          <label class="form-label">Grupo</label>
+          <select name="group_id" class="form-select">
+            {% for g in groups %}
+              <option value="{{ g.id }}">{{ g.name }}</option>
+            {% endfor %}
+          </select>
+        </div>
+        <div class="col-12 col-md-3">
+          <label class="form-label">Tipo</label>
+          <select name="category_id" class="form-select">
+            <option value="{{ cat_in_id }}">Entrada</option>
+            <option value="{{ cat_out_id }}">Saída</option>
+          </select>
+        </div>
+        <div class="col-12">
+          <label class="form-label">Descrição</label>
+          <input type="text" name="description" class="form-control" placeholder="ex.: Mercado, Salário...">
+        </div>
+        <div class="col-12 d-grid d-md-flex">
+          <button type="submit" class="btn btn-primary">Adicionar</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Lista de lançamentos agrupados por dia -->
+  {% if txs_grouped and txs_grouped|length > 0 %}
+    {% for d, items in txs_grouped %}
+      <div class="mb-4">
+        <!-- Data e saldo do dia -->
+        <div class="d-flex justify-content-between align-items-baseline mb-2">
+          <h4 class="text-muted mb-0">{{ d }}</h4>
+          {# Busca o saldo do dia no dicionário day_balances. Se d for date, use isoformat() #}
+          {% set bal = day_balances.get(d.isoformat()) if d else None %}
+          {% if bal is not none %}
+            <span class="text-muted small">Saldo do dia: R$ {{ "%.2f"|format(bal) }}</span>
+          {% endif %}
+        </div>
+        <div class="card shadow-sm border-0">
+          <div class="card-body p-0">
+            <div class="table-responsive">
+              <table class="table align-middle mb-0">
+                <thead class="table-light">
+                  <tr>
+                    <th style="width: 25%">Grupo</th>
+                    <th style="width: 20%">Valor</th>
+                    <th>Descrição</th>
+                    <th style="width: 1%"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for tx in items %}
+                    {% set is_in = (tx.amount or 0) >= 0 %}
+                    <tr>
+                      <td>{{ group_map.get(tx.group_id, '-') }}</td>
+                      <td class="fw-semibold {% if is_in %}text-success{% else %}text-danger{% endif %}">
+                        R$ {{ "%.2f"|format(tx.amount) }}
+                        {% if is_in %}
+                          <span class="badge bg-success-subtle text-success ms-2">Entrada</span>
+                        {% else %}
+                          <span class="badge bg-danger-subtle text-danger ms-2">Saída</span>
+                        {% endif %}
+                      </td>
+                      <td>{{ tx.description or "" }}</td>
+                      <td class="text-end">
+                        <form action="/transactions/delete/{{ tx.id }}" method="post" onsubmit="return confirm('Excluir este lançamento?');">
+                          <button class="btn btn-sm btn-outline-secondary">Excluir</button>
+                        </form>
+                      </td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
             </div>
           </div>
+        </div>
+      </div>
+    {% endfor %}
+  {% else %}
+    <p class="text-muted">Nenhum lançamento ainda.</p>
+  {% endif %}
 
-          <!-- Grupo -->
-          <div class="col-12">
-            <label for="group_id" class="form-label small">Grupo</label>
-            <select id="group_id" name="group_id" class="form-select" required>
-              {% if groups and groups|length > 0 %}
-                {% for g in groups %}
-                  <option value="{{ g.id }}"
-                    {% if g.name|lower == 'conta corrente' %}selected{% endif %}>
-                    {{ g.name }}
-                  </option>
-                {% endfor %}
-              {% else %}
-                <option value="" disabled selected>Cadastre um grupo na aba "Grupos"</option>
-              {% endif %}
-            </select>
-            <div class="form-text">Gerencie os grupos em <a href="/groups">Grupos</a>.</div>
-          </div>
+</div>
 
-          <!-- Tipo (Entrada/Saída) -->
-          <!-- Tipo (Entrada/Saída) -->
-          <div class="col-12 col-md-6">
-            <label for="category_id" class="form-label small">Tipo</label>
-            <select id="category_id" name="category_id" class="form-select" required>
-              <option value="{{ cat_in_id }}" selected>Entrada</option>
-              <option value="{{ cat_out_id }}">Saída</option>
-            </select>
-          </div>
-
-
-          <!-- Descrição -->
-          <div class="col-12 col-md-6">
-            <label for="description" class="form-label small">Descrição (opcional)</label>
-            <input type="text" id="description" name="description" class="form-control" placeholder="Ex.: mercado, salário, etc.">
-          </div>
-
-          <div class="col-12">
-            <button type="submit" class="btn btn-dark w-100">Lançar</button>
-          </div>
+<!-- Modal de confirmação para excluir todas -->
+<div class="modal fade" id="confirmDeleteAll" tabindex="-1" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title">Confirmar exclusão</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
+      </div>
+      <div class="modal-body">
+        Tem certeza que deseja excluir <strong>todas</strong> as transações?
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-light" data-bs-dismiss="modal">Cancelar</button>
+        <form action="/transactions/delete-all" method="post">
+          <button type="submit" class="btn btn-danger">Excluir todas</button>
         </form>
       </div>
     </div>
   </div>
-
-  <!-- Lançamentos recentes -->
-  <div class="col-12 col-lg-7">
-    <div class="card w-100">
-      <div class="card-body">
-        <div class="d-flex align-items-center justify-content-between mb-2">
-          <h2 class="h6 mb-0">Lançamentos recentes</h2>
-        </div>
-
-        {% if txs and txs|length > 0 %}
-        <div class="table-responsive">
-          <table class="table table-sm align-middle">
-            <thead>
-              <tr>
-                <th style="white-space:nowrap;">Data</th>
-                <th>Grupo</th>
-                <th style="width:20%;">Tipo</th>
-                <th class="text-end" style="white-space:nowrap;">Valor</th>
-                <th>Descrição</th>
-                <th class="text-end" style="width: 64px;"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {% set in_id = cat_in_id %}
-              {% set out_id = cat_out_id %}
-
-              {% for tx in txs %}
-              {% set is_in = (tx.category_id == in_id) %}
-              {% set is_out = (tx.category_id == out_id) %}
-              <tr>
-                <td>{{ tx.tx_date or tx.date }}</td>
-                <td>{{ group_map.get(tx.group_id, '-') }}</td>
-                <td>
-                  {% if is_in %}
-                    <span class="badge text-bg-success">Entrada</span>
-                  {% elif is_out %}
-                    <span class="badge text-bg-danger">Saída</span>
-                  {% else %}
-                    <span class="badge text-bg-secondary">—</span>
-                  {% endif %}
-                </td>
-                <td class="text-end {% if is_in %}text-success{% elif is_out %}text-danger{% endif %}">
-                  R$ {{ "%.2f"|format(tx.amount) }}
-                </td>
-                <td>{{ tx.description or "" }}</td>
-                <td class="text-end">
-                  <button
-                    type="button"
-                    class="btn btn-sm btn-outline-danger"
-                    data-bs-toggle="modal"
-                    data-bs-target="#deleteTxModal"
-                    data-tx-id="{{ tx.id }}"
-                    data-tx-desc="{{ (tx.description or '') | e }}"
-                  >
-                    Excluir
-                  </button>
-                </td>
-              </tr>
-              {% endfor %}
-            </tbody>
-
-          </table>
-        </div>
-        {% else %}
-          <p class="text-muted mb-0">Nenhum lançamento ainda.</p>
-        {% endif %}
-      </div>
-    </div>
-  </div>
 </div>
 
-<!-- Modal de confirmação de exclusão -->
-<div class="modal fade" id="deleteTxModal" tabindex="-1" aria-labelledby="deleteTxLabel" aria-hidden="true">
-  <div class="modal-dialog">
-    <form method="post" id="deleteTxForm">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h5 class="modal-title h6" id="deleteTxLabel">Excluir transação</h5>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Fechar"></button>
-        </div>
-        <div class="modal-body">
-          <p class="mb-1">Tem certeza que deseja excluir esta transação?</p>
-          <small class="text-muted" id="deleteTxDesc"></small>
-        </div>
-        <div class="modal-footer">
-          <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Cancelar</button>
-          <button type="submit" class="btn btn-danger">Excluir</button>
-        </div>
-      </div>
-    </form>
-  </div>
-</div>
-
-{% endblock %}
-
-{% block scripts %}
-<script>
-(function () {
-  const modalEl = document.getElementById('deleteTxModal');
-  const formEl  = document.getElementById('deleteTxForm');
-  const descEl  = document.getElementById('deleteTxDesc');
-
-  if (!modalEl || !formEl) return;
-
-  modalEl.addEventListener('show.bs.modal', function (event) {
-    const button = event.relatedTarget;
-    const txId   = button?.getAttribute('data-tx-id');
-    const txDesc = button?.getAttribute('data-tx-desc') || '';
-
-    // Action correta (POST) para exclusão
-    formEl.setAttribute('action', `/transactions/delete/${txId}`);
-
-    // Mostra a descrição (se houver)
-    descEl.textContent = txDesc ? `Descrição: ${txDesc}` : '';
-  });
-})();
-</script>
 {% endblock %}
