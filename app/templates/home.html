@@ -1,41 +1,134 @@
 {% extends "base.html" %}
+
 {% block content %}
 <div class="container py-4">
 
   <div class="d-flex align-items-center justify-content-between mb-3">
-    <h1 class="m-0">Saldos do dia (Hoje + Fechos mensais)</h1>
+    <h1 class="h4 mb-0">Visão diária</h1>
   </div>
 
-  <div class="card shadow-sm border-0">
+  <!-- Filtro de data -->
+  <form method="get" action="/" class="row gy-2 gx-3 align-items-end mb-4">
+    <div class="col-auto">
+      <label class="form-label mb-0">Data</label>
+      <input type="date" name="day" value="{{ day.isoformat() }}" class="form-control">
+    </div>
+    <div class="col-auto">
+      <label class="form-label mb-0"> </label>
+      <div class="form-check">
+        <input class="form-check-input" type="checkbox" value="1" id="incsim" name="include_simulations" {% if include_simulations %}checked{% endif %}>
+        <label class="form-check-label" for="incsim">
+          Incluir simulações
+        </label>
+      </div>
+    </div>
+    <div class="col-auto">
+      <button class="btn btn-primary">Aplicar</button>
+    </div>
+  </form>
+
+  <!-- Tabela consolidada -->
+  <div class="card border-0 shadow-sm mb-4">
     <div class="card-body">
-      {% if summary_rows and summary_rows|length > 0 %}
+      <div class="d-flex align-items-center justify-content-between mb-2">
+        <h2 class="h6 mb-0">Consolidado do dia ({{ day.strftime("%d/%m/%Y") }})</h2>
+      </div>
+
+      {% if rows and rows|length > 0 %}
         <div class="table-responsive">
           <table class="table align-middle">
             <thead class="table-light">
               <tr>
-                <th style="width: 28%">Data</th>
-                <th style="width: 24%">Entrada</th>
-                <th style="width: 24%">Saída</th>
-                <th>Saldo</th>
+                <th>Grupo</th>
+                <th class="text-end">Saldo do dia</th>
+                <th class="text-end">Entradas</th>
+                <th class="text-end">Saídas</th>
+                <th class="text-end">Net</th>
+                <th class="text-end">Qtde</th>
               </tr>
             </thead>
             <tbody>
-              {# já vem ordenado desc do backend, mas garantimos aqui também #}
-              {% for row in summary_rows|sort(attribute='date', reverse=True) %}
+              {% for r in rows %}
                 <tr>
-                  <td>{{ row.date }}</td>
-                  <td class="fw-semibold text-success">R$ {{ "%.2f"|format(row.in_amount) }}</td>
-                  <td class="fw-semibold text-danger">R$ {{ "%.2f"|format(row.out_amount) }}</td>
-                  <td class="fw-semibold {% if row.net >= 0 %}text-success{% else %}text-danger{% endif %}">
-                    R$ {{ "%.2f"|format(row.net) }}
+                  <td>{{ r.group_name }}</td>
+                  <td class="text-end">
+                    {% if r.balance is not none %}
+                      R$ {{ "%.2f"|format(r.balance) }}
+                    {% else %}
+                      <span class="text-muted">—</span>
+                    {% endif %}
                   </td>
+                  <td class="text-end text-success">R$ {{ "%.2f"|format(r.sum_in) }}</td>
+                  <td class="text-end text-danger">R$ {{ "%.2f"|format(r.sum_out) }}</td>
+                  <td class="text-end fw-semibold">
+                    {% set net = r.net %}
+                    <span class="{% if net>=0 %}text-success{% else %}text-danger{% endif %}">
+                      R$ {{ "%.2f"|format(net) }}
+                    </span>
+                  </td>
+                  <td class="text-end">{{ r.qty }}</td>
                 </tr>
               {% endfor %}
             </tbody>
           </table>
         </div>
       {% else %}
-        <p class="text-muted mb-0">Nenhum saldo encontrado.</p>
+        <div class="alert alert-light text-muted border-dashed mb-0">
+          Nenhum dado para {{ day.strftime("%d/%m/%Y") }}.
+        </div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Transações do dia, por grupo -->
+  <div class="card border-0 shadow-sm">
+    <div class="card-body">
+      <h2 class="h6 mb-3">Transações do dia</h2>
+
+      {% if transactions_by_group and transactions_by_group|length > 0 %}
+        {% for gid, txs in transactions_by_group.items() %}
+          <div class="mb-3">
+            <div class="d-flex align-items-center justify-content-between mb-2">
+              <div class="fw-semibold">{{ group_map.get(gid, "—") }}</div>
+            </div>
+            <div class="table-responsive">
+              <table class="table table-sm align-middle">
+                <thead class="table-light">
+                  <tr>
+                    <th style="width: 10%">Valor</th>
+                    <th>Descrição</th>
+                    <th style="width: 1%"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {% for tx in txs %}
+                    {% set is_in = (tx.amount or 0) >= 0 %}
+                    <tr>
+                      <td class="fw-semibold {% if is_in %}text-success{% else %}text-danger{% endif %}">
+                        R$ {{ "%.2f"|format(tx.amount) }}
+                      </td>
+                      <td>
+                        {{ tx.description or "" }}
+                        {% if tx.is_simulation %}
+                          <span class="badge bg-warning text-dark ms-2">Simulado</span>
+                        {% endif %}
+                      </td>
+                      <td class="text-end">
+                        <form action="/transactions/delete/{{ tx.id }}" method="post" onsubmit="return confirm('Excluir este lançamento?');">
+                          <button class="btn btn-sm btn-outline-secondary">Excluir</button>
+                        </form>
+                      </td>
+                    </tr>
+                  {% endfor %}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <div class="alert alert-light text-muted border-dashed mb-0">
+          Nenhuma transação para {{ day.strftime("%d/%m/%Y") }}.
+        </div>
       {% endif %}
     </div>
   </div>

@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request, Form, HTTPException, Query
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from jinja2 import Environment, FileSystemLoader
+
 from jose import jwt, JWTError
 from passlib.context import CryptContext
 from sqlalchemy import func, text, case
@@ -283,12 +284,16 @@ def get_user_groups(uid: int) -> List[Group]:
 
 def ensure_default_group(uid: int) -> Group:
     with Session(engine) as s:
-        g = s.exec(select(Group).where(Group.user_id == uid, Group.name == "Conta Corrente")).first()
+        g = s.exec(
+            select(Group).where(Group.user_id == uid, Group.name == "Conta Corrente")
+        ).first()
         if g:
             return g
-        g = Group(user_id=uid, name="Conta Corrente")
+        # criar com kind explícito
+        g = Group(user_id=uid, name="Conta Corrente", kind="in")
         s.add(g); s.commit(); s.refresh(g)
         return g
+
 
 # -----------------------------
 # Helpers: Saldo (DayBalance)
@@ -634,270 +639,126 @@ def on_startup():
 # -----------------------------
 # Home (dashboard)
 # -----------------------------
+from datetime import date, datetime
+from typing import Optional, Dict, Any, List
+from fastapi import Request, HTTPException
+from fastapi.responses import HTMLResponse
+from fastapi import Query
+from sqlmodel import Session, select, func, case
+
+# ... imports existentes do seu arquivo (engine, templates, require_user, ensure_default_group, etc.)
+from .models import DayBalance, Transaction, Group, Category
+
+from datetime import date
+from typing import Optional, Dict, Any, List
+from fastapi import Query, Request, HTTPException
+from fastapi.responses import HTMLResponse
+from sqlmodel import Session, select, func, case
+
+from .models import DayBalance, Transaction, Group, Category
+
 @app.get("/", response_class=HTMLResponse)
-def home(
-    request: Request,
-    start: Optional[str] = Query(default=None),
-    end: Optional[str] = Query(default=None),
-    gf: Optional[TList[str]] = Query(default=None),  # filtro por grupos
-):
-    uid = get_current_user_id(request)
+def home(request: Request, day: Optional[str] = Query(default=None), include_simulations: bool = Query(default=False)):
+    """
+    Home diária consolidada a partir de joins entre DayBalance e Transaction,
+    sem usar Relationship nem Jinja2Templates.
+    Filtro por data (?day=YYYY-MM-DD) e opção ?include_simulations=1 para incluir simulações.
+    """
+    uid = require_user(request)
 
-    # Sem login: render "vazio" com estrutura esperada pelo template
-    if not uid:
-        return render(
-            "home.html",
-            title="FinApp",
-            user_id=None,
-            month=None,
-            groups=None,
-            totals=None,
-            day_rows=None,
-            start_val=None,
-            end_val=None,
-            gf=[],
-            gf_label=None,
-            group_options=[],
-            default_group_id=None,
-            summary_rows=[],   # tabela da home
-        )
-
-    # -----------------------------
-    # (SEU) preparo padrão de contexto (mantido)
-    # -----------------------------
-    default_group = ensure_default_group(uid)
-    groups_orm = get_user_groups(uid) or [default_group]
-    group_options = [{"id": g.id, "name": g.name} for g in groups_orm]
-    name_by_gid = {g["id"]: g["name"] for g in group_options}
-
-    first_day, next_month_first, month_label = month_bounds()
-    groups_list, totals = monthly_summary_by_group(uid)
-
-    default_start = first_day
-    default_end = next_month_first - timedelta(days=1)
-    start_date = parse_date_yyyy_mm_dd(start) or default_start
-    end_date   = parse_date_yyyy_mm_dd(end)   or default_end
-    if end_date < start_date:
-        end_date = start_date
-
-    full_day_rows = daily_series_by_group(uid, start_date, end_date)
-
-    gf_list: List[str] = [*gf] if gf else []
-    gf_set = set(gf_list)
-
-    if not gf_list or "all" in gf_set:
-        filtered = full_day_rows
-        gf_label = "Todos os grupos"
-    elif "total" in gf_set and len(gf_set) == 1:
-        filtered = []
-        running = 0.0
-        for d in full_day_rows:
-            inc = sum(r["in"] for r in d["rows"])
-            out = sum(r["out"] for r in d["rows"])
-            net = inc - out
-            running += net
-            filtered.append({
-                "day": d["day"],
-                "rows": [{
-                    "group": "Total",
-                    "in": inc, "out": out, "net": net, "balance": running
-                }]
-            })
-        gf_label = "Total"
+    # 1) Resolver a data
+    if day:
+        try:
+            current_day = date.fromisoformat(day)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Parâmetro 'day' inválido. Use YYYY-MM-DD.")
     else:
-        selected_ids = set()
-        for v in gf_list:
-            try:
-                selected_ids.add(int(v))
-            except ValueError:
-                pass
-        selected_names = [name_by_gid.get(i, f"#{i}") for i in selected_ids if i in name_by_gid]
-        out_rows = []
-        for d in full_day_rows:
-            rows = []
-            prev_balance = 0.0
-            for r in d["rows"]:
-                try:
-                    gid = next(g["id"] for g in group_options if g["name"] == r["group"])
-                except StopIteration:
-                    gid = None
-                if gid in selected_ids:
-                    rows.append(r)
-                    prev_balance = r.get("balance", prev_balance)
-            if not rows:
-                rows.append({"group": "—", "in": 0.0, "out": 0.0, "net": 0.0, "balance": prev_balance})
-            rows.sort(key=lambda x: x["group"].lower())
-            out_rows.append({"day": d["day"], "rows": rows})
-        gf_label = ", ".join(sorted(selected_names))
-        filtered = out_rows
+        current_day = date.today()
 
-    display_rows = _prune_empty_days(filtered)
+    # 2) Garantir que o grupo padrão exista (ex.: "Conta Corrente")
+    default_group = ensure_default_group(uid)
 
-    # -----------------------------
-    # TABELA DA HOME: Hoje + Fechos mensais
-    # Regras:
-    # - Linha "hoje": usa o próprio dia
-    # - Linha de cada mês: SEMPRE exibe a data do EOM (ex.: 2025-08-31),
-    #   mas pega os valores do "último dia inputado" dentro do mês:
-    #       1) DayBalance no EOM; senão
-    #       2) último DayBalance do mês; senão
-    #       3) último dia com transação do mês; senão
-    #       4) zeros
-    # - Saldo = DayBalance do "dia de origem" (se houver). Se não houver,
-    #   saldo = Entradas - Saídas desse "dia de origem".
-    # -----------------------------
-    import calendar
-
-    MONTHS_BACK = 6
-    today = date.today()
-
-    # Utilitários seguros (sem scalar_one_or_none)
-    def _coerce_first_scalar(res):
-        if res is None:
-            return None
-        return res[0] if isinstance(res, (tuple, list)) else res
-
-    def _day_in_out(session: Session, d: date) -> Tuple[float, float]:
-        # Saída como valor POSITIVO (usamos ABS para ser robusto ao sinal no banco)
-        row = session.exec(
-            select(
-                func.coalesce(
-                    func.sum(
-                        case((Category.kind == "in", Transaction.amount), else_=0.0)
-                    ), 0.0
-                ).label("in_sum"),
-                func.coalesce(
-                    func.sum(
-                        case((Category.kind == "out", func.abs(Transaction.amount)), else_=0.0)
-                    ), 0.0
-                ).label("out_sum"),
-            )
-            .select_from(Transaction)
-            .join(Category, Category.id == Transaction.category_id, isouter=True)
-            .where(Transaction.user_id == uid, Transaction.tx_date == d)
-        ).first()
-        if not row:
-            return 0.0, 0.0
-        in_sum, out_sum = row
-        return float(in_sum or 0.0), float(out_sum or 0.0)
-
-    def _day_db_sum(session: Session, d: date) -> Optional[float]:
-        # Soma DayBalance de todos os grupos no dia d
-        res = session.exec(
-            select(func.sum(DayBalance.balance)).where(
-                DayBalance.user_id == uid,
-                DayBalance.day == d
-            )
-        ).first()
-        val = _coerce_first_scalar(res)
-        return None if val is None else float(val or 0.0)
-
-    def _last_db_day_in_month(session: Session, month_start: date, eom: date) -> Optional[date]:
-        # pega explicitamente o último dia com DB (ORDER BY ... DESC LIMIT 1)
-        res = session.exec(
-            select(DayBalance.day)
-            .where(
-                DayBalance.user_id == uid,
-                DayBalance.day >= month_start,
-                DayBalance.day <= eom,
-            )
-            .order_by(DayBalance.day.desc())
-        ).first()
-        return _coerce_first_scalar(res)
-
-    def _last_tx_day_in_month(session: Session, month_start: date, eom: date) -> Optional[date]:
-        res = session.exec(
-            select(Transaction.tx_date)
-            .where(
-                Transaction.user_id == uid,
-                Transaction.tx_date >= month_start,
-                Transaction.tx_date <= eom,
-            )
-            .order_by(Transaction.tx_date.desc())
-        ).first()
-        return _coerce_first_scalar(res)
-
-    # monta alvos mensais (início_do_mês, fim_do_mês)
-    month_targets: List[Tuple[date, date]] = []
-    for i in range(1, MONTHS_BACK + 1):
-        y = today.year
-        m = today.month - i
-        while m <= 0:
-            m += 12
-            y -= 1
-        last_dom = calendar.monthrange(y, m)[1]
-        month_targets.append((date(y, m, 1), date(y, m, last_dom)))
-
-    summary_rows: List[Dict[str, float]] = []
+    rows: List[Dict[str, Any]] = []
+    transactions_by_group: Dict[int, List[Transaction]] = {}
 
     with Session(engine) as s:
-        # --- linha de HOJE ---
-        in_today, out_today = _day_in_out(s, today)
-        saldo_today = _day_db_sum(s, today)
-        if saldo_today is None:
-            saldo_today = in_today - out_today
-        summary_rows.append({
-            "date": today.isoformat(),
-            "in_amount": in_today,
-            "out_amount": out_today,
-            "net": saldo_today,
-        })
+        # 3) Mapa de grupos do usuário
+        groups = s.exec(select(Group).where(Group.user_id == uid)).all()
+        group_map = {g.id: g.name for g in groups}
 
-        # --- linhas de FECHO MENSAL ---
-        for month_start, eom in month_targets:
-            display_day = eom     # a data exibida na tabela (EOM)
-            source_day  = eom     # de onde vamos pegar os valores
+        # 4) DayBalance do dia (por grupo)
+        balances = s.exec(
+            select(DayBalance.group_id, DayBalance.balance)
+            .where(DayBalance.user_id == uid)
+            .where(DayBalance.day == current_day)
+        ).all()
+        balance_map: Dict[int, float] = {gid: float(bal) for gid, bal in balances}
 
-            # 1) tenta DayBalance no EOM
-            saldo = _day_db_sum(s, eom)
+        # 5) Agregações de transações do dia (por grupo), com join em Category
+        tx_stmt = (
+            select(
+                Transaction.group_id.label("gid"),
+                func.sum(case((Category.kind == "in", Transaction.amount), else_=0.0)).label("sum_in"),
+                func.sum(case((Category.kind == "out", -Transaction.amount), else_=0.0)).label("sum_out"),
+                func.sum(case((Category.kind == "in", Transaction.amount), else_=-Transaction.amount)).label("net"),
+                func.count(Transaction.id).label("qty"),
+            )
+            .join(Category, Category.id == Transaction.category_id)
+            .where(Transaction.user_id == uid)
+            .where(Transaction.tx_date == current_day)
+            .group_by(Transaction.group_id)
+        )
+        if not include_simulations:
+            tx_stmt = tx_stmt.where(Transaction.is_simulation == False)
 
-            # 2) se não houver, busca o ÚLTIMO DayBalance do mês
-            if saldo is None:
-                last_db_day = _last_db_day_in_month(s, month_start, eom)
-                if last_db_day is not None:
-                    source_day = last_db_day
-                    saldo = _day_db_sum(s, last_db_day)
+        tx_aggs = s.exec(tx_stmt).all()
+        tx_map: Dict[int, Dict[str, Any]] = {}
+        for gid, sum_in, sum_out, net, qty in tx_aggs:
+            tx_map[gid or 0] = {
+                "sum_in": float(sum_in or 0.0),
+                "sum_out": float(sum_out or 0.0),
+                "net": float(net or 0.0),
+                "qty": int(qty or 0),
+            }
 
-            # 3) se ainda não houver DB no mês, pega o ÚLTIMO dia com transação
-            if saldo is None:
-                last_tx_day = _last_tx_day_in_month(s, month_start, eom)
-                if last_tx_day is not None:
-                    source_day = last_tx_day
+        # 6) Carregar as transações do dia (pra listar no final, agrupadas por grupo)
+        list_stmt = (
+            select(Transaction)
+            .where(Transaction.user_id == uid, Transaction.tx_date == current_day)
+            .order_by(Transaction.id.desc())
+        )
+        if not include_simulations:
+            list_stmt = list_stmt.where(Transaction.is_simulation == False)
 
-            # entradas/saídas vêm do dia de origem
-            in_sum, out_sum = _day_in_out(s, source_day)
+        for tx in s.exec(list_stmt).all():
+            transactions_by_group.setdefault(tx.group_id or 0, []).append(tx)
 
-            # saldo definitivo: DB se houver; senão, in - out do dia de origem
-            if saldo is None:
-                saldo = in_sum - out_sum
-
-            summary_rows.append({
-                "date": display_day.isoformat(),  # exibe EOM (ex.: 2025-08-31)
-                "in_amount": in_sum,              # valores do último dia inputado no mês
-                "out_amount": out_sum,
-                "net": saldo,                     # DayBalance desse dia (ou fallback)
+        # 7) Montar linhas: união dos grupos que têm saldo no dia OU transações no dia
+        group_ids = set(balance_map.keys()) | set(tx_map.keys())
+        for gid in sorted(group_ids):
+            name = group_map.get(gid, "-")
+            bal = balance_map.get(gid)
+            ag = tx_map.get(gid, {"sum_in": 0.0, "sum_out": 0.0, "net": 0.0, "qty": 0})
+            rows.append({
+                "group_id": gid,
+                "group_name": name,
+                "balance": bal,
+                "sum_in": ag["sum_in"],
+                "sum_out": ag["sum_out"],
+                "net": ag["net"],
+                "qty": ag["qty"],
             })
 
-    # Ordena desc por data (só por garantia)
-    summary_rows.sort(key=lambda r: r["date"], reverse=True)
-
-    return render(
-        "home.html",
-        title="FinApp",
-        user_id=uid,
-        month=month_label,
-        groups=groups_list,
-        totals=totals,
-        day_rows=display_rows,
-        start_val=start_date.isoformat(),
-        end_val=end_date.isoformat(),
-        gf=gf_list,
-        gf_label=gf_label,
-        group_options=group_options,
-        default_group_id=default_group.id,
-        summary_rows=summary_rows,  # <- usado pelo home.html
+    # 8) Renderizar sem mudar sua forma de conectar (templates é um Environment)
+    html = templates.get_template("home.html").render(
+        request=request,  # se o seu base.html usa isso para url_for, etc.
+        day=current_day,
+        rows=rows,
+        transactions_by_group=transactions_by_group,
+        group_map=group_map,
+        include_simulations=include_simulations,
     )
-
+    return HTMLResponse(html)
 
 
 
@@ -954,14 +815,21 @@ def signup_post(email: str = Form(), password: str = Form()):
 import hashlib
 import re
 
-def ensure_group(uid: int, name: str) -> Group:
+def ensure_group(uid: int, name: str, kind: str = "in") -> Group:
     with Session(engine) as s:
-        g = s.exec(select(Group).where(Group.user_id == uid, Group.name == name)).first()
+        g = s.exec(
+            select(Group).where(Group.user_id == uid, Group.name == name)
+        ).first()
         if g:
+            # se existir mas estiver sem kind, corrige
+            if not g.kind:
+                g.kind = kind or "in"
+                s.add(g); s.commit(); s.refresh(g)
             return g
-        g = Group(user_id=uid, name=name)
+        g = Group(user_id=uid, name=name, kind=kind or "in")
         s.add(g); s.commit(); s.refresh(g)
         return g
+
 
 def build_itau_uid(dt: date, desc: str, amount: float) -> str:
     # UID estável por origem: "itau|YYYY-MM-DD|DESC_NORMALIZADA|{amount:.2f}"
@@ -1094,12 +962,24 @@ def groups_page(request: Request):
 
 
 @app.post("/groups/new")
-def groups_new(request: Request, name: str = Form(...)):
+def groups_new(
+    request: Request,
+    name: str = Form(...),
+    kind: str = Form(default="in")  # "in" ou "out"
+):
     uid = require_user(request)
+    if kind not in ("in", "out"):
+        kind = "in"
     with Session(engine) as s:
-        g = Group(name=name, user_id=uid)
+        exists = s.exec(
+            select(Group).where(Group.user_id == uid, Group.name == name)
+        ).first()
+        if exists:
+            return RedirectResponse(url="/groups?err=exists", status_code=303)
+        g = Group(user_id=uid, name=name, kind=kind)
         s.add(g); s.commit()
-    return RedirectResponse("/groups", status_code=303)
+    return RedirectResponse(url="/groups", status_code=303)
+
 
 
 @app.post("/groups/delete/{gid}")
@@ -1230,7 +1110,6 @@ def transactions_page(request: Request):
     )
 
 
-
 @app.post("/transactions/new")
 def create_transaction(
     request: Request,
@@ -1248,6 +1127,7 @@ def create_transaction(
     except Exception:
         raise HTTPException(status_code=400, detail="Invalid date")
 
+    # grupo padrão se necessário
     default_group = ensure_default_group(uid)
 
     # garante tipos e usa Entrada por padrão se vier vazio
@@ -1277,11 +1157,12 @@ def create_transaction(
             category_id=category_id,
             description=description,
             account_id=None,
+            # >>> NOVO: tudo que é manual é simulação
+            is_simulation=True,
         )
         s.add(tx); s.commit()
 
     return RedirectResponse("/transactions", status_code=302)
-
 
 
 @app.post("/transactions/delete/{tx_id}")
@@ -1380,7 +1261,6 @@ def build_itau_uid_legacy(d: _date, desc: str, amount: float) -> str:
 # Se seu projeto tem DayBalance, importe do seu models:
 # from .models import DayBalance, Transaction, Group, Category
 # E já existem: require_user, ensure_group, get_or_create_in_out_categories, today_date, engine
-
 @app.post("/transactions/import/itau-pdf")
 def import_itau_pdf(
     request: Request,
@@ -1400,16 +1280,15 @@ def import_itau_pdf(
     lines: List[str] = []
     pdf_error: Optional[Exception] = None
 
-    # 1) tentar com pdfplumber
+    # 1) pdfplumber (preferencial)
     try:
-        with pdfplumber.open(io.BytesIO(content)) as pdf:
+        with pdfplumber.open(io.BytesIO(content), password=password) as pdf:
             for page in pdf.pages:
                 txt = page.extract_text() or ""
                 if txt:
                     lines.extend([ln.strip() for ln in txt.splitlines() if ln.strip()])
-    except Exception as e:
-        pdf_error = e
-        print("ERRO pdfplumber:", type(e).__name__, e)
+    except Exception as e1:
+        pdf_error = e1
 
     # 2) fallback pypdf (com decrypt se necessário)
     if not lines:
@@ -1442,11 +1321,16 @@ def import_itau_pdf(
     skipped = 0
     balances_upserted = 0
 
+    # Regex e helpers já existentes no seu arquivo (mantidos)
+    # _LINE_DATE, _MONEY_RE, _TIME_RE, _safe_parse_pt_date, parse_brl_money,
+    # build_itau_uid, build_itau_uid_legacy
+
     with Session(engine) as s:
         for ln in lines:
-            # --- SALDO DO DIA ---
-            if "SALDO DO DIA" in ln:
-                parts = ln.split()
+            # --- LINHA DE SALDO DO DIA ---
+            if "SALDO DO DIA" in ln.upper():
+                parts = [p for p in ln.split() if p.strip()]
+                # tenta achar data + último token como valor
                 if parts and _LINE_DATE.match(parts[0]):
                     d = _safe_parse_pt_date(parts[0])
                     money_tok = None
@@ -1525,7 +1409,9 @@ def import_itau_pdf(
                 amount=amount,
                 description=desc,
                 account_id=None,
-                tx_uid=new_uid
+                tx_uid=new_uid,
+                # >>> NOVO: importação oficial (não é simulação)
+                is_simulation=False,
             )
             s.add(tx); s.commit()
             imported += 1
