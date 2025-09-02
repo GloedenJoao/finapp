@@ -805,6 +805,181 @@ def home(request: Request, day: Optional[str] = Query(default=None), include_sim
     )
     return HTMLResponse(html)
 
+# --- helpers de datas (reutilizamos o formato YYYY-MM-DD) ---
+from typing import Optional
+from datetime import date as _date
+
+def _parse_date_yyyy_mm_dd(v: Optional[str]) -> Optional[_date]:
+    if not v:
+        return None
+    try:
+        return _date.fromisoformat(v)
+    except Exception:
+        return None
+
+
+# --- consulta consolidada por período ---
+from collections import defaultdict
+from sqlmodel import Session, select
+from sqlalchemy import func, case
+
+def period_aggregate(uid: int, start_d: _date, end_d: _date, include_simulations: bool):
+    """
+    Retorna:
+      - totals: {"sum_in": float, "sum_out": float, "net": float, "qty": int}
+      - by_group: [{group_id, group_name, sum_in, sum_out, net, qty}]
+      - by_day: [{"day": date, "sum_in":..., "sum_out":..., "net":..., "qty":..., "items":[Transaction,...]}]
+    """
+    with Session(engine) as s:
+        # mapa de grupos do usuário
+        groups = s.exec(select(Group).where(Group.user_id == uid)).all()
+        name_by_gid = {g.id: g.name for g in groups}
+
+        # base: transações do usuário no intervalo
+        conds = [
+            Transaction.user_id == uid,
+            Transaction.tx_date >= start_d,
+            Transaction.tx_date <= end_d,
+        ]
+        if not include_simulations:
+            conds.append(Transaction.is_simulation == False)  # noqa: E712
+
+        # agregação por grupo
+        stmt_group = (
+            select(
+                Transaction.group_id.label("gid"),
+                func.sum(
+                    case(
+                        (Category.kind == "in", Transaction.amount),
+                        else_=0.0,
+                    )
+                ).label("sum_in"),
+                func.sum(
+                    case(
+                        (Category.kind == "out", -Transaction.amount),
+                        else_=0.0,
+                    )
+                ).label("sum_out"),
+                func.count().label("qty"),
+            )
+            .select_from(Transaction)
+            .join(Category, Category.id == Transaction.category_id)
+            .where(*conds, Category.kind.in_(("in", "out")))
+            .group_by(Transaction.group_id)
+        )
+        rows_group = list(s.exec(stmt_group).all())
+
+        by_group = []
+        totals = {"sum_in": 0.0, "sum_out": 0.0, "net": 0.0, "qty": 0}
+        for gid, s_in, s_out, qty in rows_group:
+            s_in = float(s_in or 0.0)
+            s_out = float(s_out or 0.0)
+            net = s_in - s_out
+            by_group.append({
+                "group_id": gid,
+                "group_name": name_by_gid.get(gid, "-"),
+                "sum_in": s_in, "sum_out": s_out, "net": net, "qty": int(qty or 0),
+            })
+            totals["sum_in"] += s_in
+            totals["sum_out"] += s_out
+            totals["net"] += net
+            totals["qty"] += int(qty or 0)
+
+        # agregação por dia + lista de itens por dia (para detalhar no template)
+        stmt_items = (
+            select(Transaction)
+            .where(*conds)
+            .order_by(Transaction.tx_date.desc(), Transaction.id.desc())
+        )
+        items = s.exec(stmt_items).all()
+
+        items_by_day = defaultdict(list)
+        for tx in items:
+            items_by_day[tx.tx_date].append(tx)
+
+        by_day = []
+        for d in sorted(items_by_day.keys(), reverse=True):
+            day_items = items_by_day[d]
+            # somatório por dia via Python (já temos items)
+            s_in = 0.0
+            s_out = 0.0
+            for it in day_items:
+                # descobrimos se é in/out pela categoria (consulta rápida em memória)
+                # se tiver Category na session, podemos mapear por id:
+                pass
+            # Como o tipo vem de Category.kind na agregação SQL, aqui recalculamos por segurança:
+            # Para ficar consistente, fazemos uma query leve por ids de categorias deste dia
+            cat_ids = list({it.category_id for it in day_items if it.category_id})
+            kind_by_cat = {}
+            if cat_ids:
+                qs = s.exec(select(Category.id, Category.kind).where(
+                    Category.user_id == uid, Category.id.in_(cat_ids)
+                )).all()
+                kind_by_cat = {cid: kind for cid, kind in qs}
+
+            for it in day_items:
+                kind = kind_by_cat.get(it.category_id)
+                if kind == "in":
+                    s_in += float(it.amount or 0.0)
+                elif kind == "out":
+                    s_out += float(-(it.amount or 0.0))
+
+            by_day.append({
+                "day": d,
+                "sum_in": s_in,
+                "sum_out": s_out,
+                "net": s_in - s_out,
+                "qty": len(day_items),
+                "items": day_items,
+            })
+
+        # ordena grupos por nome
+        by_group.sort(key=lambda r: r["group_name"].lower() if r["group_name"] else "")
+        return {"totals": totals, "by_group": by_group, "by_day": by_day,"group_map": name_by_gid,}
+
+# --- página Resumo por Período ---
+from fastapi import Query
+from fastapi.responses import HTMLResponse
+
+from typing import Optional
+from fastapi import Query
+
+@app.get("/summary", response_class=HTMLResponse)
+def summary_page(
+    request: Request,
+    start: Optional[str] = Query(default=None),  # antes: str | None
+    end:   Optional[str] = Query(default=None),  # antes: str | None
+    include_simulations: bool = Query(default=False)
+):
+    uid = require_user(request)  # mantém o fluxo de auth/redirect como no resto do app
+    # ^ usa o mesmo handler/redirect para login que você já tem. :contentReference[oaicite:2]{index=2}
+
+    today = _date.today()
+    # defaults: últimos 7 dias
+    default_end = today
+    default_start = _date.fromordinal(today.toordinal() - 6)
+
+    s_date = _parse_date_yyyy_mm_dd(start) or default_start
+    e_date = _parse_date_yyyy_mm_dd(end)   or default_end
+    if e_date < s_date:
+        e_date = s_date
+
+    data = period_aggregate(uid, s_date, e_date, include_simulations)
+
+    html = templates.get_template("period.html").render(
+        request=request,
+        title="Resumo por Período",
+        user_id=uid,
+        start_val=s_date.isoformat(),
+        end_val=e_date.isoformat(),
+        include_simulations=include_simulations,
+        totals=data["totals"],
+        by_group=data["by_group"],
+        by_day=data["by_day"],
+        group_map=data["group_map"],  # << incluir isto
+    )
+
+    return HTMLResponse(html)
 
 
 

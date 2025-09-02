@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="d-flex align-items-center justify-content-between mb-3">
+  <h1 class="h5 mb-0">Resumo por Período</h1>
+</div>
+
+<form method="get" action="/summary" class="row g-2 align-items-end mb-3">
+  <div class="col-12 col-md-3">
+    <label class="form-label">Data inicial</label>
+    <input type="date" name="start" class="form-control" value="{{ start_val }}">
+  </div>
+  <div class="col-12 col-md-3">
+    <label class="form-label">Data final</label>
+    <input type="date" name="end" class="form-control" value="{{ end_val }}">
+  </div>
+  <div class="col-12 col-md-3">
+    <div class="form-check mt-4 pt-2">
+      <input class="form-check-input" type="checkbox" id="chkSim" name="include_simulations" value="1" {% if include_simulations %}checked{% endif %}>
+      <label for="chkSim" class="form-check-label">Incluir simulações</label>
+    </div>
+  </div>
+  <div class="col-12 col-md-3 d-grid">
+    <button class="btn btn-primary">Aplicar</button>
+  </div>
+</form>
+
+<!-- KPIs -->
+<div class="row g-3 mb-2">
+  <div class="col-6 col-lg-3">
+    <div class="card h-100"><div class="card-body">
+      <div class="small text-muted">Entradas</div>
+      <div class="fs-5 fw-semibold text-success">R$ {{ "%.2f"|format(totals.sum_in or 0) }}</div>
+    </div></div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="card h-100"><div class="card-body">
+      <div class="small text-muted">Saídas</div>
+      <div class="fs-5 fw-semibold text-danger">R$ {{ "%.2f"|format(totals.sum_out or 0) }}</div>
+    </div></div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="card h-100"><div class="card-body">
+      <div class="small text-muted">Resultado (Net)</div>
+      <div class="fs-5 fw-semibold {% if (totals.net or 0) >= 0 %}text-success{% else %}text-danger{% endif %}">
+        R$ {{ "%.2f"|format(totals.net or 0) }}
+      </div>
+    </div></div>
+  </div>
+  <div class="col-6 col-lg-3">
+    <div class="card h-100"><div class="card-body">
+      <div class="small text-muted">Qtde de lançamentos</div>
+      <div class="fs-5 fw-semibold">{{ totals.qty or 0 }}</div>
+    </div></div>
+  </div>
+</div>
+
+<!-- Por grupo -->
+<div class="card mb-4">
+  <div class="card-body">
+    <h2 class="h6 mb-3">Consolidado por grupo</h2>
+    <div class="table-responsive">
+      <table class="table align-middle mb-0">
+        <thead class="table-light">
+          <tr>
+            <th>Grupo</th>
+            <th class="text-end">Entradas</th>
+            <th class="text-end">Saídas</th>
+            <th class="text-end">Net</th>
+            <th class="text-end">Lanç.</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in by_group %}
+          <tr>
+            <td>{{ r.group_name or '-' }}</td>
+            <td class="text-end text-success">R$ {{ "%.2f"|format(r.sum_in or 0) }}</td>
+            <td class="text-end text-danger">R$ {{ "%.2f"|format(r.sum_out or 0) }}</td>
+            <td class="text-end {% if (r.net or 0) >= 0 %}text-success{% else %}text-danger{% endif %}">
+              R$ {{ "%.2f"|format(r.net or 0) }}
+            </td>
+            <td class="text-end">{{ r.qty or 0 }}</td>
+          </tr>
+          {% endfor %}
+          {% if not by_group or by_group|length == 0 %}
+          <tr><td colspan="5" class="text-muted">Sem dados no período.</td></tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<!-- Por dia -->
+<div class="accordion" id="accDays">
+  {% for d in by_day %}
+  <div class="accordion-item mb-2">
+    <h2 class="accordion-header" id="h-{{ d.day }}">
+      <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#c-{{ d.day }}">
+        <div class="d-flex w-100 align-items-center justify-content-between">
+          <div class="me-3 fw-semibold">
+            {{ d.day.strftime("%d/%m/%Y") if d.day.strftime else d.day }}
+          </div>
+          <div class="small text-muted">
+            Entradas: <strong class="text-success">R$ {{ "%.2f"|format(d.sum_in or 0) }}</strong> &nbsp;·&nbsp;
+            Saídas: <strong class="text-danger">R$ {{ "%.2f"|format(d.sum_out or 0) }}</strong> &nbsp;·&nbsp;
+            Net: <strong class="{% if (d.net or 0) >= 0 %}text-success{% else %}text-danger{% endif %}">R$ {{ "%.2f"|format(d.net or 0) }}</strong> &nbsp;·&nbsp;
+            Lanç.: <strong>{{ d.qty or 0 }}</strong>
+          </div>
+        </div>
+      </button>
+    </h2>
+    <div id="c-{{ d.day }}" class="accordion-collapse collapse" data-bs-parent="#accDays">
+      <div class="accordion-body p-0">
+        <div class="table-responsive">
+          <table class="table align-middle mb-0">
+            <thead class="table-light">
+              <tr>
+                <th>Grupo</th>
+                <th>Valor</th>
+                <th>Descrição</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for tx in d["items"] %}
+                {% set is_in = (tx.amount or 0) >= 0 %}
+                <tr>
+                  <td>{{ group_map.get(tx.group_id, '-') if group_map else tx.group_id }}</td>
+                  <td class="fw-semibold {% if is_in %}text-success{% else %}text-danger{% endif %}">
+                    R$ {{ "%.2f"|format(tx.amount) }}
+                    {% if is_in %}
+                      <span class="badge bg-success-subtle text-success ms-2">Entrada</span>
+                    {% else %}
+                      <span class="badge bg-danger-subtle text-danger ms-2">Saída</span>
+                    {% endif %}
+                    {% if tx.is_simulation %}
+                      <span class="badge bg-warning text-dark ms-2">Simulado</span>
+                    {% endif %}
+                  </td>
+                  <td>{{ tx.description or "" }}</td>
+                </tr>
+              {% endfor %}
+              {% if not d["items"] or d["items"]|length == 0 %}
+              <tr><td colspan="3" class="text-muted">Sem lançamentos.</td></tr>
+              {% endif %}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  </div>
+  {% endfor %}
+  {% if not by_day or by_day|length == 0 %}
+  <div class="alert alert-light text-muted border-dashed">Nenhum lançamento encontrado no período.</div>
+  {% endif %}
+</div>
+
+{% endblock %}
