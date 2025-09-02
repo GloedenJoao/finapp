@@ -643,6 +643,7 @@ def home(
 ):
     uid = get_current_user_id(request)
 
+    # Sem login: render "vazio" com estrutura esperada pelo template
     if not uid:
         return render(
             "home.html",
@@ -658,33 +659,32 @@ def home(
             gf_label=None,
             group_options=[],
             default_group_id=None,
+            summary_rows=[],   # tabela da home
         )
 
-    # Garante grupo padrão e carrega opções
+    # -----------------------------
+    # (SEU) preparo padrão de contexto (mantido)
+    # -----------------------------
     default_group = ensure_default_group(uid)
     groups_orm = get_user_groups(uid) or [default_group]
     group_options = [{"id": g.id, "name": g.name} for g in groups_orm]
     name_by_gid = {g["id"]: g["name"] for g in group_options}
 
-    # Resumo do mês (sem futuro)
     first_day, next_month_first, month_label = month_bounds()
     groups_list, totals = monthly_summary_by_group(uid)
 
-    # Período (mês atual por padrão)
     default_start = first_day
     default_end = next_month_first - timedelta(days=1)
     start_date = parse_date_yyyy_mm_dd(start) or default_start
-    end_date = parse_date_yyyy_mm_dd(end) or default_end
+    end_date   = parse_date_yyyy_mm_dd(end)   or default_end
     if end_date < start_date:
         end_date = start_date
 
     full_day_rows = daily_series_by_group(uid, start_date, end_date)
 
-    # Normaliza gf para lista
-    gf_list: TList[str] = gf or []
+    gf_list: List[str] = [*gf] if gf else []
     gf_set = set(gf_list)
 
-    # Aplica filtro
     if not gf_list or "all" in gf_set:
         filtered = full_day_rows
         gf_label = "Todos os grupos"
@@ -705,39 +705,181 @@ def home(
             })
         gf_label = "Total"
     else:
-        # Apenas grupos selecionados por id
         selected_ids = set()
         for v in gf_list:
             try:
                 selected_ids.add(int(v))
             except ValueError:
                 pass
-        selected_names = {name_by_gid[i] for i in selected_ids if i in name_by_gid}
+        selected_names = [name_by_gid.get(i, f"#{i}") for i in selected_ids if i in name_by_gid]
+        out_rows = []
+        for d in full_day_rows:
+            rows = []
+            prev_balance = 0.0
+            for r in d["rows"]:
+                try:
+                    gid = next(g["id"] for g in group_options if g["name"] == r["group"])
+                except StopIteration:
+                    gid = None
+                if gid in selected_ids:
+                    rows.append(r)
+                    prev_balance = r.get("balance", prev_balance)
+            if not rows:
+                rows.append({"group": "—", "in": 0.0, "out": 0.0, "net": 0.0, "balance": prev_balance})
+            rows.sort(key=lambda x: x["group"].lower())
+            out_rows.append({"day": d["day"], "rows": rows})
+        gf_label = ", ".join(sorted(selected_names))
+        filtered = out_rows
 
-        if not selected_names:
-            filtered = full_day_rows
-            gf_label = "Todos os grupos"
-        else:
-            out_rows: TList[Dict] = []
-            for d in full_day_rows:
-                rows = [r for r in d["rows"] if r["group"] in selected_names]
-                existing_names = {r["group"] for r in rows}
-                for name in selected_names - existing_names:
-                    prev_balance = 0.0
-                    if out_rows:
-                        for prev in reversed(out_rows):
-                            prev_row = next((rr for rr in prev["rows"] if rr["group"] == name), None)
-                            if prev_row:
-                                prev_balance = prev_row["balance"]
-                                break
-                    rows.append({"group": name, "in": 0.0, "out": 0.0, "net": 0.0, "balance": prev_balance})
-                rows.sort(key=lambda x: x["group"].lower())
-                out_rows.append({"day": d["day"], "rows": rows})
-            gf_label = ", ".join(sorted(selected_names))
-            filtered = out_rows
-
-    # Mantém apenas dias com movimento
     display_rows = _prune_empty_days(filtered)
+
+    # -----------------------------
+    # TABELA DA HOME: Hoje + Fechos mensais
+    # Regras:
+    # - Linha "hoje": usa o próprio dia
+    # - Linha de cada mês: SEMPRE exibe a data do EOM (ex.: 2025-08-31),
+    #   mas pega os valores do "último dia inputado" dentro do mês:
+    #       1) DayBalance no EOM; senão
+    #       2) último DayBalance do mês; senão
+    #       3) último dia com transação do mês; senão
+    #       4) zeros
+    # - Saldo = DayBalance do "dia de origem" (se houver). Se não houver,
+    #   saldo = Entradas - Saídas desse "dia de origem".
+    # -----------------------------
+    import calendar
+
+    MONTHS_BACK = 6
+    today = date.today()
+
+    # Utilitários seguros (sem scalar_one_or_none)
+    def _coerce_first_scalar(res):
+        if res is None:
+            return None
+        return res[0] if isinstance(res, (tuple, list)) else res
+
+    def _day_in_out(session: Session, d: date) -> Tuple[float, float]:
+        # Saída como valor POSITIVO (usamos ABS para ser robusto ao sinal no banco)
+        row = session.exec(
+            select(
+                func.coalesce(
+                    func.sum(
+                        case((Category.kind == "in", Transaction.amount), else_=0.0)
+                    ), 0.0
+                ).label("in_sum"),
+                func.coalesce(
+                    func.sum(
+                        case((Category.kind == "out", func.abs(Transaction.amount)), else_=0.0)
+                    ), 0.0
+                ).label("out_sum"),
+            )
+            .select_from(Transaction)
+            .join(Category, Category.id == Transaction.category_id, isouter=True)
+            .where(Transaction.user_id == uid, Transaction.tx_date == d)
+        ).first()
+        if not row:
+            return 0.0, 0.0
+        in_sum, out_sum = row
+        return float(in_sum or 0.0), float(out_sum or 0.0)
+
+    def _day_db_sum(session: Session, d: date) -> Optional[float]:
+        # Soma DayBalance de todos os grupos no dia d
+        res = session.exec(
+            select(func.sum(DayBalance.balance)).where(
+                DayBalance.user_id == uid,
+                DayBalance.day == d
+            )
+        ).first()
+        val = _coerce_first_scalar(res)
+        return None if val is None else float(val or 0.0)
+
+    def _last_db_day_in_month(session: Session, month_start: date, eom: date) -> Optional[date]:
+        # pega explicitamente o último dia com DB (ORDER BY ... DESC LIMIT 1)
+        res = session.exec(
+            select(DayBalance.day)
+            .where(
+                DayBalance.user_id == uid,
+                DayBalance.day >= month_start,
+                DayBalance.day <= eom,
+            )
+            .order_by(DayBalance.day.desc())
+        ).first()
+        return _coerce_first_scalar(res)
+
+    def _last_tx_day_in_month(session: Session, month_start: date, eom: date) -> Optional[date]:
+        res = session.exec(
+            select(Transaction.tx_date)
+            .where(
+                Transaction.user_id == uid,
+                Transaction.tx_date >= month_start,
+                Transaction.tx_date <= eom,
+            )
+            .order_by(Transaction.tx_date.desc())
+        ).first()
+        return _coerce_first_scalar(res)
+
+    # monta alvos mensais (início_do_mês, fim_do_mês)
+    month_targets: List[Tuple[date, date]] = []
+    for i in range(1, MONTHS_BACK + 1):
+        y = today.year
+        m = today.month - i
+        while m <= 0:
+            m += 12
+            y -= 1
+        last_dom = calendar.monthrange(y, m)[1]
+        month_targets.append((date(y, m, 1), date(y, m, last_dom)))
+
+    summary_rows: List[Dict[str, float]] = []
+
+    with Session(engine) as s:
+        # --- linha de HOJE ---
+        in_today, out_today = _day_in_out(s, today)
+        saldo_today = _day_db_sum(s, today)
+        if saldo_today is None:
+            saldo_today = in_today - out_today
+        summary_rows.append({
+            "date": today.isoformat(),
+            "in_amount": in_today,
+            "out_amount": out_today,
+            "net": saldo_today,
+        })
+
+        # --- linhas de FECHO MENSAL ---
+        for month_start, eom in month_targets:
+            display_day = eom     # a data exibida na tabela (EOM)
+            source_day  = eom     # de onde vamos pegar os valores
+
+            # 1) tenta DayBalance no EOM
+            saldo = _day_db_sum(s, eom)
+
+            # 2) se não houver, busca o ÚLTIMO DayBalance do mês
+            if saldo is None:
+                last_db_day = _last_db_day_in_month(s, month_start, eom)
+                if last_db_day is not None:
+                    source_day = last_db_day
+                    saldo = _day_db_sum(s, last_db_day)
+
+            # 3) se ainda não houver DB no mês, pega o ÚLTIMO dia com transação
+            if saldo is None:
+                last_tx_day = _last_tx_day_in_month(s, month_start, eom)
+                if last_tx_day is not None:
+                    source_day = last_tx_day
+
+            # entradas/saídas vêm do dia de origem
+            in_sum, out_sum = _day_in_out(s, source_day)
+
+            # saldo definitivo: DB se houver; senão, in - out do dia de origem
+            if saldo is None:
+                saldo = in_sum - out_sum
+
+            summary_rows.append({
+                "date": display_day.isoformat(),  # exibe EOM (ex.: 2025-08-31)
+                "in_amount": in_sum,              # valores do último dia inputado no mês
+                "out_amount": out_sum,
+                "net": saldo,                     # DayBalance desse dia (ou fallback)
+            })
+
+    # Ordena desc por data (só por garantia)
+    summary_rows.sort(key=lambda r: r["date"], reverse=True)
 
     return render(
         "home.html",
@@ -753,7 +895,11 @@ def home(
         gf_label=gf_label,
         group_options=group_options,
         default_group_id=default_group.id,
+        summary_rows=summary_rows,  # <- usado pelo home.html
     )
+
+
+
 
 
 # -----------------------------
