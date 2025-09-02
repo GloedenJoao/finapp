@@ -122,6 +122,18 @@
               </tr>
             </thead>
             <tbody>
+              <!-- Linha especial: Saldo do dia -->
+              <tr class="table-info">
+                <td colspan="3">
+                  {% if d.day_balance is not none %}
+                    <span class="me-2">Saldo do dia (Conta Corrente):</span>
+                    <strong>R$ {{ "%.2f"|format(d.day_balance) }}</strong>
+                  {% else %}
+                    <span class="text-muted">Saldo do dia não disponível</span>
+                  {% endif %}
+                </td>
+              </tr>
+
               {% for tx in d["items"] %}
                 {% set is_in = (tx.amount or 0) >= 0 %}
                 <tr>

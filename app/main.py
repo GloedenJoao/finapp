@@ -975,10 +975,11 @@ def period_aggregate(uid: int, start_d: _date, end_d: _date, include_simulations
     Retorna:
       - totals: {"sum_in": float, "sum_out": float, "net": float, "qty": int}
       - by_group: [{group_id, group_name, sum_in, sum_out, net, qty}]
-      - by_day: [{"day": date, "sum_in":..., "sum_out":..., "net":..., "qty":..., "items":[Transaction,...]}]
+      - by_day: [{"day": date, "sum_in":..., "sum_out":..., "net":..., "qty":..., "items":[Transaction,...], "day_balance": float|None}]
+      - group_map: {id: nome}
     """
     with Session(engine) as s:
-        # mapa de grupos do usuário
+        # mapa de grupos
         groups = s.exec(select(Group).where(Group.user_id == uid)).all()
         name_by_gid = {g.id: g.name for g in groups}
 
@@ -1032,7 +1033,7 @@ def period_aggregate(uid: int, start_d: _date, end_d: _date, include_simulations
             totals["net"] += net
             totals["qty"] += int(qty or 0)
 
-        # agregação por dia + lista de itens por dia (para detalhar no template)
+        # itens por dia (deduplicados)
         stmt_items = (
             select(Transaction)
             .where(*conds)
@@ -1040,28 +1041,46 @@ def period_aggregate(uid: int, start_d: _date, end_d: _date, include_simulations
         )
         items = s.exec(stmt_items).all()
 
-        items_by_day = defaultdict(list)
+        items_by_day = defaultdict(dict)  # day -> {tx.id: tx}
         for tx in items:
-            items_by_day[tx.tx_date].append(tx)
+            if not getattr(tx, "id", None):
+                continue
+            items_by_day[tx.tx_date][tx.id] = tx
+
+        # Conta Corrente
+        cc = s.exec(
+            select(Group).where(Group.user_id == uid, func.lower(Group.name) == "conta corrente")
+        ).first()
+        cc_id = cc.id if cc else None
+
+        all_days = sorted(items_by_day.keys())
+        day_balance_map = {}
+        if cc_id and all_days:
+            rows_bal = s.exec(
+                select(DayBalance.day, DayBalance.balance)
+                .where(
+                    DayBalance.user_id == uid,
+                    DayBalance.group_id == cc_id,
+                    DayBalance.day.in_(all_days),
+                )
+            ).all()
+            for d, bal in rows_bal:
+                day_balance_map[d] = float(bal or 0.0)
 
         by_day = []
         for d in sorted(items_by_day.keys(), reverse=True):
-            day_items = items_by_day[d]
-            # somatório por dia via Python (já temos items)
-            s_in = 0.0
-            s_out = 0.0
-            for it in day_items:
-                # descobrimos se é in/out pela categoria (consulta rápida em memória)
-                # se tiver Category na session, podemos mapear por id:
-                pass
-            # Como o tipo vem de Category.kind na agregação SQL, aqui recalculamos por segurança:
-            # Para ficar consistente, fazemos uma query leve por ids de categorias deste dia
+            day_items = list(items_by_day[d].values())
+            s_in, s_out = 0.0, 0.0
+
+            # soma in/out
             cat_ids = list({it.category_id for it in day_items if it.category_id})
             kind_by_cat = {}
             if cat_ids:
-                qs = s.exec(select(Category.id, Category.kind).where(
-                    Category.user_id == uid, Category.id.in_(cat_ids)
-                )).all()
+                qs = s.exec(
+                    select(Category.id, Category.kind).where(
+                        Category.user_id == uid, Category.id.in_(cat_ids)
+                    )
+                ).all()
                 kind_by_cat = {cid: kind for cid, kind in qs}
 
             for it in day_items:
@@ -1078,11 +1097,11 @@ def period_aggregate(uid: int, start_d: _date, end_d: _date, include_simulations
                 "net": s_in - s_out,
                 "qty": len(day_items),
                 "items": day_items,
+                "day_balance": day_balance_map.get(d),
             })
 
-        # ordena grupos por nome
         by_group.sort(key=lambda r: r["group_name"].lower() if r["group_name"] else "")
-        return {"totals": totals, "by_group": by_group, "by_day": by_day,"group_map": name_by_gid,}
+        return {"totals": totals, "by_group": by_group, "by_day": by_day, "group_map": name_by_gid}
 
 # --- página Resumo por Período ---
 from fastapi import Query
