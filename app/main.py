@@ -123,7 +123,154 @@ def require_user(request: StarletteRequest) -> int:
 
     return uid
 
+import re
+from typing import Optional
 
+_APLICACAO_RE = re.compile(r'^\s*APLICACAO[:\-\s]+(.+)$', flags=re.IGNORECASE)
+
+def resolve_group_from_description(s: Session, user_id: int, description: Optional[str]) -> Optional[int]:
+    """
+    Se description começar com 'APLICACAO', retorna o group_id correspondente ao
+    nome extraído (criando o grupo se não existir). Caso contrário, None.
+    """
+    if not description:
+        return None
+    m = _APLICACAO_RE.match(description or "")
+    if not m:
+        return None
+
+    raw = m.group(1).strip()
+    if not raw:
+        return None
+
+    # Normaliza espaços internos
+    group_name = re.sub(r'\s+', ' ', raw)
+
+    # procura grupo do usuário com esse nome (case-sensitive por padrão; ajuste se quiser insensitive)
+    g = s.exec(select(Group).where(Group.user_id == user_id, Group.name == group_name)).first()
+    if g:
+        return g.id
+
+    # cria se não existir
+    g = Group(user_id=user_id, name=group_name)
+    s.add(g); s.commit(); s.refresh(g)
+    return g.id
+
+# --- Regras de transferência interna (APLICACAO/RESGATE) ---
+import re
+from typing import Optional, Tuple
+
+_RE_APLIC = re.compile(r'^\s*APLICACAO[:\-\s]+(.+)$', re.IGNORECASE)
+_RE_RESG  = re.compile(r'^\s*RESGATE[:\-\s]+(.+)$', re.IGNORECASE)
+
+def _ensure_group_by_name(s: Session, uid: int, name: str) -> Group:
+    """
+    Retorna (ou cria) um grupo do usuário.
+    A busca é case-insensitive: 'casa', 'Casa', 'CASA' => mesmo grupo.
+    O nome salvo será o primeiro encontrado ou, se criar, o 'name' informado.
+    """
+    norm = name.strip().lower()
+    g = s.exec(
+        select(Group).where(
+            Group.user_id == uid,
+            func.lower(Group.name) == norm  # <<< case-insensitive
+        )
+    ).first()
+    if g:
+        return g
+
+    g = Group(user_id=uid, name=name.strip())
+    s.add(g)
+    s.commit()
+    s.refresh(g)
+    return g
+
+
+def _ensure_default_current_account(s: Session, uid: int) -> Group:
+    # por padrão chamamos de "Conta Corrente"
+    return _ensure_group_by_name(s, uid, "Conta Corrente")
+
+def _basic_category_ids(s: Session, uid: int) -> Tuple[int, int]:
+    """Retorna (cat_in_id, cat_out_id). Se não houver, cria genéricas."""
+    cat_in  = s.exec(select(Category).where(Category.user_id == uid, Category.kind == "in")).first()
+    cat_out = s.exec(select(Category).where(Category.user_id == uid, Category.kind == "out")).first()
+    if not cat_in:
+        cat_in = Category(user_id=uid, name="Geral (Entrada)", kind="in")
+        s.add(cat_in); s.commit(); s.refresh(cat_in)
+    if not cat_out:
+        cat_out = Category(user_id=uid, name="Geral (Saída)",   kind="out")
+        s.add(cat_out); s.commit(); s.refresh(cat_out)
+    return cat_in.id, cat_out.id
+
+def _parse_transfer_intent(desc: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Retorna (tipo, group_name) onde tipo ∈ {"aplicacao","resgate"} ou (None,None) se não bater.
+    """
+    if not desc:
+        return None, None
+    m = _RE_APLIC.match(desc)
+    if m:
+        return "aplicacao", re.sub(r'\s+', ' ', m.group(1)).strip()
+    m = _RE_RESG.match(desc)
+    if m:
+        return "resgate", re.sub(r'\s+', ' ', m.group(1)).strip()
+    return None, None
+
+def _create_internal_transfer_pair(
+    s: Session,
+    uid: int,
+    tx_date: date,
+    amount: float,
+    target_group_name: str,
+    intent: str,  # "aplicacao" (CC -> Grupo) ou "resgate" (Grupo -> CC)
+    is_simulation: bool,
+    base_uid: Optional[str] = None,
+):
+    """
+    Cria duas transações espelho:
+      - aplicacao: CC (out, -|amt|)  & Grupo (in, +|amt|)
+      - resgate:   Grupo (out, -|amt|) & CC (in, +|amt|)
+    """
+    # normaliza sinal
+    val = abs(float(amount or 0.0))
+    if val <= 0:
+        return
+
+    cc = _ensure_default_current_account(s, uid)  # "Conta Corrente"
+    tgt = _ensure_group_by_name(s, uid, target_group_name)
+    cat_in_id, cat_out_id = _basic_category_ids(s, uid)
+
+    # tx_uids (se houver base_uid — p.ex., da importação — cria um espelho)
+    uid_a = base_uid or None
+    uid_b = (base_uid + "::mirror") if base_uid else None
+
+    if intent == "aplicacao":
+        # 1) CC: saída
+        tx1 = Transaction(
+            user_id=uid, tx_date=tx_date, group_id=cc.id, category_id=cat_out_id,
+            amount=-val, description=f"APLICACAO -> {tgt.name}", tx_uid=uid_a, is_simulation=is_simulation
+        )
+        # 2) Grupo: entrada
+        tx2 = Transaction(
+            user_id=uid, tx_date=tx_date, group_id=tgt.id, category_id=cat_in_id,
+            amount=+val, description=f"APLICACAO de CC", tx_uid=uid_b, is_simulation=is_simulation
+        )
+    elif intent == "resgate":
+        # 1) Grupo: saída
+        tx1 = Transaction(
+            user_id=uid, tx_date=tx_date, group_id=tgt.id, category_id=cat_out_id,
+            amount=-val, description=f"RESGATE para CC", tx_uid=uid_a, is_simulation=is_simulation
+        )
+        # 2) CC: entrada
+        tx2 = Transaction(
+            user_id=uid, tx_date=tx_date, group_id=cc.id, category_id=cat_in_id,
+            amount=+val, description=f"RESGATE <- {tgt.name}", tx_uid=uid_b, is_simulation=is_simulation
+        )
+    else:
+        return
+
+    s.add(tx1); s.add(tx2)
+    s.commit()
 
 
 # -----------------------------
@@ -1351,60 +1498,82 @@ def transactions_page(request: Request):
         
     )
 
+from typing import Optional
+from datetime import date as _date
+from fastapi import Request, Form
+from fastapi.responses import RedirectResponse
+from sqlmodel import Session, select
 
 @app.post("/transactions/new")
 def create_transaction(
     request: Request,
-    amount: float = Form(),
-    date_str: str = Form(alias="date"),
-    group_id: Optional[int] = Form(default=None),
-    category_id: Optional[int] = Form(default=None),
-    description: str = Form(default="")
+    tx_date: str = Form(...),           # "YYYY-MM-DD"
+    amount: float = Form(...),          # pode vir negativo/positivo
+    category_id: int = Form(...),       # id de Category existente (in/out)
+    group_id: Optional[int] = Form(None),
+    description: Optional[str] = Form(""),
 ):
     uid = require_user(request)
 
-    # data
+    # Parse da data
     try:
-        d = date.fromisoformat(date_str)
+        d = _date.fromisoformat(tx_date)
     except Exception:
-        raise HTTPException(status_code=400, detail="Invalid date")
-
-    # grupo padrão se necessário
-    default_group = ensure_default_group(uid)
-
-    # garante tipos e usa Entrada por padrão se vier vazio
-    cat_in, cat_out, _ = get_or_create_in_out_categories(uid)
-    if category_id is None:
-        category_id = cat_in.id
+        d = _date.today()
 
     with Session(engine) as s:
-        # valida tipo
-        cat = s.exec(select(Category).where(Category.id == category_id, Category.user_id == uid)).first()
+        # valida categoria pertence ao usuário
+        cat = s.exec(
+            select(Category).where(Category.user_id == uid, Category.id == category_id)
+        ).first()
         if not cat:
             raise HTTPException(status_code=400, detail="Tipo inválido")
 
-        # valida grupo (ou usa padrão)
+        # garante "Conta Corrente" (default)
+        conta_corrente = _ensure_default_current_account(s, uid)
+
+        # valida grupo caso tenha vindo
         if group_id is not None:
-            g = s.exec(select(Group).where(Group.id == group_id, Group.user_id == uid)).first()
+            g = s.exec(
+                select(Group).where(Group.user_id == uid, Group.id == group_id)
+            ).first()
             if not g:
                 raise HTTPException(status_code=400, detail="Grupo inválido")
         else:
-            group_id = default_group.id
+            group_id = conta_corrente.id
 
+        # ===== NOVA REGRA: transferência interna por descrição =====
+        intent, tgt_name = _parse_transfer_intent(description)
+        if intent in ("aplicacao", "resgate") and tgt_name:
+            # Lançamento manual é SIMULAÇÃO
+            _create_internal_transfer_pair(
+                s=s,
+                uid=uid,
+                tx_date=d,
+                amount=amount,
+                target_group_name=tgt_name,
+                intent=intent,            # "aplicacao" (CC->Grupo) | "resgate" (Grupo->CC)
+                is_simulation=True,       # <<< manual = simulação
+                base_uid=None,            # sem UID base aqui
+            )
+            return RedirectResponse("/transactions", status_code=303)
+
+        # ===== Fluxo normal (sem regra APLICACAO/RESGATE) =====
         tx = Transaction(
             user_id=uid,
-            amount=amount,
             tx_date=d,
             group_id=group_id,
             category_id=category_id,
-            description=description,
+            amount=amount,
+            description=description or "",
             account_id=None,
-            # >>> NOVO: tudo que é manual é simulação
-            is_simulation=True,
+            tx_uid=None,                 # manual não usa UID de dedupe
+            is_simulation=True,          # <<< manual = simulação
         )
-        s.add(tx); s.commit()
+        s.add(tx)
+        s.commit()
 
-    return RedirectResponse("/transactions", status_code=302)
+    return RedirectResponse("/transactions", status_code=303)
 
 
 @app.post("/transactions/delete/{tx_id}")
@@ -1503,162 +1672,129 @@ def build_itau_uid_legacy(d: _date, desc: str, amount: float) -> str:
 # Se seu projeto tem DayBalance, importe do seu models:
 # from .models import DayBalance, Transaction, Group, Category
 # E já existem: require_user, ensure_group, get_or_create_in_out_categories, today_date, engine
+from typing import List, Optional, Tuple
+from datetime import date as _date, datetime
+from fastapi import UploadFile, File, HTTPException
+from sqlmodel import Session, select
+from pypdf import PdfReader
+import io, re
+import uuid
+
+# --- utilitários rápidos para parser ---
+_RE_LINE = re.compile(
+    r'(?P<date>\d{2}/\d{2}/\d{4})\s+(?P<desc>.+?)\s+(?P<amount>[-+]?\d{1,3}(?:\.\d{3})*,\d{2})\s*$'
+)
+
+def _brl_to_float(s: str) -> float:
+    # "1.234,56" -> 1234.56
+    s = s.strip().replace(".", "").replace(",", ".")
+    try:
+        return float(s)
+    except Exception:
+        return 0.0
+
+def _parse_itau_pdf_to_rows(pdf_bytes: bytes) -> List[Tuple[_date, str, float]]:
+    """
+    Retorna lista de tuplas (data, descricao, valor_float).
+    Valor positivo = crédito; negativo = débito (pelo próprio sinal).
+    """
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    rows: List[Tuple[_date, str, float]] = []
+    for page in reader.pages:
+        text = page.extract_text() or ""
+        for raw in text.splitlines():
+            m = _RE_LINE.search(raw)
+            if not m:
+                continue
+            dt_s = m.group("date")
+            desc = m.group("desc").strip()
+            amt_s = m.group("amount")
+
+            try:
+                d = datetime.strptime(dt_s, "%d/%m/%Y").date()
+            except Exception:
+                continue
+
+            val = _brl_to_float(amt_s)
+            rows.append((d, desc, val))
+    return rows
+
+def _first_category_of_kind(s: Session, uid: int, kind: str) -> int:
+    c = s.exec(select(Category).where(Category.user_id == uid, Category.kind == kind)).first()
+    if c:
+        return c.id
+    # cria genérica se não houver
+    c = Category(user_id=uid, name=f"Geral ({'Entrada' if kind=='in' else 'Saída'})", kind=kind)
+    s.add(c); s.commit(); s.refresh(c)
+    return c.id
+
+
 @app.post("/transactions/import/itau-pdf")
-def import_itau_pdf(
-    request: Request,
-    file: UploadFile = File(...),
-    password: Optional[str] = Form(default=None),
-):
+def import_itau_pdf(request: Request, file: UploadFile = File(...)):
     uid = require_user(request)
 
-    # garante grupo e categorias
-    conta_corrente = ensure_group(uid, "Conta Corrente")
-    cat_in, cat_out, _ = get_or_create_in_out_categories(uid)
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Envie um arquivo PDF.")
 
-    content = file.file.read()
-    if not content:
-        raise HTTPException(status_code=400, detail="Arquivo vazio")
+    pdf_bytes = file.file.read()
+    if not pdf_bytes:
+        raise HTTPException(status_code=400, detail="PDF vazio.")
 
-    lines: List[str] = []
-    pdf_error: Optional[Exception] = None
-
-    # 1) pdfplumber (preferencial)
+    # 1) Parser -> linhas (data, descrição, valor)
     try:
-        with pdfplumber.open(io.BytesIO(content), password=password) as pdf:
-            for page in pdf.pages:
-                txt = page.extract_text() or ""
-                if txt:
-                    lines.extend([ln.strip() for ln in txt.splitlines() if ln.strip()])
-    except Exception as e1:
-        pdf_error = e1
+        rows = _parse_itau_pdf_to_rows(pdf_bytes)
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Falha ao ler PDF: {e}")
 
-    # 2) fallback pypdf (com decrypt se necessário)
-    if not lines:
-        try:
-            reader = PdfReader(io.BytesIO(content))
-            if reader.is_encrypted:
-                if not password:
-                    raise HTTPException(status_code=400, detail="PDF protegido por senha. Informe a senha.")
-                ok = reader.decrypt(password)
-                if not ok:
-                    raise HTTPException(status_code=400, detail="Senha do PDF inválida.")
-
-            for page in reader.pages:
-                txt = page.extract_text() or ""
-                if txt:
-                    lines.extend([ln.strip() for ln in txt.splitlines() if ln.strip()])
-        except HTTPException:
-            raise
-        except Exception as e2:
-            print("ERRO pypdf:", type(e2).__name__, e2)
-            msg = "Não foi possível ler o PDF"
-            if pdf_error:
-                msg += f" (pdfplumber: {type(pdf_error).__name__}; pypdf: {type(e2).__name__})"
-            raise HTTPException(status_code=400, detail=msg)
-
-    if not lines:
-        raise HTTPException(status_code=400, detail="Não foi possível extrair texto do PDF (pode ser somente imagem).")
-
-    imported = 0
-    skipped = 0
-    balances_upserted = 0
-
-    # Regex e helpers já existentes no seu arquivo (mantidos)
-    # _LINE_DATE, _MONEY_RE, _TIME_RE, _safe_parse_pt_date, parse_brl_money,
-    # build_itau_uid, build_itau_uid_legacy
+    if not rows:
+        raise HTTPException(status_code=400, detail="Nenhuma linha reconhecida no PDF.")
 
     with Session(engine) as s:
-        for ln in lines:
-            # --- LINHA DE SALDO DO DIA ---
-            if "SALDO DO DIA" in ln.upper():
-                parts = [p for p in ln.split() if p.strip()]
-                # tenta achar data + último token como valor
-                if parts and _LINE_DATE.match(parts[0]):
-                    d = _safe_parse_pt_date(parts[0])
-                    money_tok = None
-                    for tok in reversed(parts):
-                        if _MONEY_RE.match(tok):
-                            money_tok = tok
-                            break
-                    if money_tok:
-                        balance = parse_brl_money(money_tok)
-                        # upsert de saldo diário (ajuste ao seu model DayBalance)
-                        dbal = s.exec(
-                            select(DayBalance).where(
-                                DayBalance.user_id == uid,
-                                DayBalance.group_id == conta_corrente.id,
-                                DayBalance.day == d
-                            )
-                        ).first()
-                        if dbal:
-                            if float(dbal.balance) != balance:
-                                dbal.balance = balance
-                                s.add(dbal); s.commit()
-                            balances_upserted += 1
-                        else:
-                            s.add(DayBalance(
-                                user_id=uid, group_id=conta_corrente.id,
-                                day=d, balance=balance, source="itau"
-                            ))
-                            s.commit()
-                            balances_upserted += 1
-                continue  # não é transação
+        # 2) Garantias: Conta Corrente + categorias básicas
+        conta_corrente = _ensure_default_current_account(s, uid)
+        cat_in_id  = _first_category_of_kind(s, uid, "in")
+        cat_out_id = _first_category_of_kind(s, uid, "out")
 
-            # --- LINHA DE TRANSAÇÃO ---
-            tokens = ln.split()
-            if not tokens or not _LINE_DATE.match(tokens[0]):
-                continue
+        # 3) SALVAR TRANSAÇÕES
+        created = 0
+        for d, desc, amount in rows:
+            # UID base para dedupe (por linha do extrato)
+            new_uid = f"itau:{uid}:{d.isoformat()}:{uuid.uuid4().hex}"
 
-            raw_amount = tokens[-1]
-            if not _MONEY_RE.match(raw_amount):
-                continue
-
-            amount = parse_brl_money(raw_amount)
-
-            # (3) EXTRAÇÃO DE HORA E DESCRIÇÃO
-            mid_tokens = tokens[1:-1]  # entre data e valor
-            time_tok: Optional[str] = None
-            for tok in mid_tokens:
-                if _TIME_RE.fullmatch(tok):
-                    time_tok = tok
-                    break
-
-            desc_tokens = [t for t in mid_tokens if t != time_tok]
-            desc = " ".join(desc_tokens).strip()
-
-            d = _safe_parse_pt_date(tokens[0])
-            cat_id = cat_in.id if amount >= 0 else cat_out.id
-
-            # UID novo (com hora) + legado (sem hora) para compatibilidade
-            new_uid = build_itau_uid(d, time_tok, desc, amount)
-            old_uid = build_itau_uid_legacy(d, desc, amount)
-
-            existing = s.exec(
-                select(Transaction).where(
-                    Transaction.user_id == uid,
-                    Transaction.tx_uid.in_([new_uid, old_uid])
+            # ===== NOVA REGRA: transferência interna por descrição =====
+            intent, tgt_name = _parse_transfer_intent(desc)
+            if intent in ("aplicacao", "resgate") and tgt_name:
+                _create_internal_transfer_pair(
+                    s=s,
+                    uid=uid,
+                    tx_date=d,
+                    amount=amount,           # usa o valor "cru" do extrato
+                    target_group_name=tgt_name,
+                    intent=intent,           # "aplicacao" (CC->Grupo) | "resgate" (Grupo->CC)
+                    is_simulation=False,     # <<< importado = oficial
+                    base_uid=new_uid,        # cria par com ::mirror
                 )
-            ).first()
-            if existing:
-                skipped += 1
+                created += 2
                 continue
+
+            # ===== Fluxo original (sem APLICACAO/RESGATE) =====
+            # Decide categoria pela direção do valor (opcional; mantenha sua lógica se já tiver):
+            cat_id = cat_in_id if amount >= 0 else cat_out_id
 
             tx = Transaction(
                 user_id=uid,
                 tx_date=d,
-                group_id=conta_corrente.id,
+                group_id=conta_corrente.id,   # padrão: Conta Corrente
                 category_id=cat_id,
                 amount=amount,
                 description=desc,
                 account_id=None,
                 tx_uid=new_uid,
-                # >>> NOVO: importação oficial (não é simulação)
                 is_simulation=False,
             )
-            s.add(tx); s.commit()
-            imported += 1
+            s.add(tx)
+            s.commit()
+            created += 1
 
-    return RedirectResponse(
-        url=f"/transactions?imported={imported}&skipped={skipped}&balances={balances_upserted}",
-        status_code=303
-    )
+    return RedirectResponse("/transactions", status_code=303)
+
