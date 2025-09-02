@@ -26,6 +26,12 @@ from .models import User, Category, Transaction, Group, DayBalance
 
 import json
 
+from urllib.parse import quote
+from starlette.requests import Request as StarletteRequest  # se já não tiver
+from starlette.responses import RedirectResponse
+from fastapi import HTTPException
+
+
 
 # -----------------------------
 # Config
@@ -56,6 +62,33 @@ def render(name: str, **ctx) -> HTMLResponse:
 # -----------------------------
 # Helpers: Auth
 # -----------------------------
+
+
+class NotAuthenticated(Exception):
+    """Levantada quando o usuário precisa estar logado e não está."""
+    pass
+
+def _build_next_param(request: StarletteRequest) -> str:
+    path = request.url.path
+    q = str(request.url.query or "")
+    current = path + (f"?{q}" if q else "")
+    return quote(current, safe="")
+
+@app.exception_handler(NotAuthenticated)
+def _handle_not_authenticated(request: StarletteRequest, exc: NotAuthenticated):
+    next_param = _build_next_param(request)
+    return RedirectResponse(url=f"/login?next={next_param}", status_code=302)
+
+# Opcional: redireciona 401/403 que surgirem em outros pontos
+@app.exception_handler(HTTPException)
+def _handle_http_exc_redirect_login(request: StarletteRequest, exc: HTTPException):
+    if exc.status_code in (401, 403):
+        next_param = _build_next_param(request)
+        return RedirectResponse(url=f"/login?next={next_param}", status_code=302)
+    # deixe os demais erros seguirem
+    raise exc
+
+
 def make_token(user_id: int, minutes: int = TOKEN_MINUTES) -> str:
     payload = {"sub": str(user_id), "exp": datetime.utcnow() + timedelta(minutes=minutes)}
     return jwt.encode(payload, SECRET, algorithm=ALGO)
@@ -74,11 +107,23 @@ def get_current_user_id(request: Request) -> Optional[int]:
         return None
 
 
-def require_user(request: Request) -> int:
-    uid = get_current_user_id(request)
+def require_user(request: StarletteRequest) -> int:
+    token = request.cookies.get("access_token")
+    if not token:
+        raise NotAuthenticated()
+
+    try:
+        data = jwt.decode(token, SECRET, algorithms=[ALGO])
+        uid = int(data.get("sub") or 0)
+    except Exception:
+        raise NotAuthenticated()
+
     if not uid:
-        raise HTTPException(status_code=401, detail="Login required")
+        raise NotAuthenticated()
+
     return uid
+
+
 
 
 # -----------------------------
@@ -767,23 +812,45 @@ def home(request: Request, day: Optional[str] = Query(default=None), include_sim
 # Auth
 # -----------------------------
 @app.get("/login", response_class=HTMLResponse)
-def login_get(request: Request):
-    uid = get_current_user_id(request)
-    if uid:
-        return RedirectResponse("/", status_code=302)
-    return render("login.html", title="Sign in")
+def login_get(request: StarletteRequest, next: str = Query(default="")):
+    # usa seu Environment (templates) normalmente
+    html = templates.get_template("login.html").render(
+        request=request,
+        next=next or "",
+        error=""
+    )
+    return HTMLResponse(html)
+
+
+def _is_safe_next(v: str) -> bool:
+    return bool(v) and v.startswith("/")
 
 
 @app.post("/login")
-def login_post(email: str = Form(), password: str = Form()):
+def login_post(
+    request: StarletteRequest,
+    email: str = Form(...),
+    password: str = Form(...),
+    next: str = Form(default="")
+):
     with Session(engine) as s:
         user = s.exec(select(User).where(User.email == email)).first()
-        if not user or not PWD.verify(password, user.password_hash):
-            raise HTTPException(status_code=401, detail="Invalid credentials")
-        token = make_token(user.id)
-    resp = RedirectResponse("/", status_code=302)
-    resp.set_cookie("access_token", token, httponly=True, secure=False)
+
+    if not user or not PWD.verify(password, user.password_hash):
+        html = templates.get_template("login.html").render(
+            request=request,
+            next=next or "",
+            error="Usuário ou senha inválidos."
+        )
+        return HTMLResponse(html, status_code=401)
+
+    token = make_token(user.id)
+    # redireciona para 'next' (se for um caminho interno), senão para home
+    target = next if _is_safe_next(next) else "/"
+    resp = RedirectResponse(url=target, status_code=302)
+    resp.set_cookie("access_token", token, httponly=True, samesite="lax")  # ajuste 'secure' se usar HTTPS
     return resp
+
 
 
 @app.get("/signup", response_class=HTMLResponse)

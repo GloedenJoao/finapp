@@ -1,8 +1,36 @@
 {% extends "base.html" %}
+
 {% block content %}
-<form action="/login" method="post" class="vstack gap-3">
-  <input id="email" name="email" type="email" class="form-control" required>
-  <input id="password" name="password" type="password" class="form-control" required>
-  <button class="btn btn-dark w-100">Entrar</button>
-</form>
+<div class="container py-5" style="max-width: 420px;">
+  <div class="card shadow-sm border-0">
+    <div class="card-body">
+      <h1 class="h4 text-center mb-4">Entrar</h1>
+
+      <form action="/login" method="post">
+        <!-- campo oculto para redirecionamento -->
+        <input type="hidden" name="next" value="{{ next or '' }}">
+
+        <div class="mb-3">
+          <label for="email" class="form-label">E-mail</label>
+          <input type="email" class="form-control" id="email" name="email" required>
+        </div>
+
+        <div class="mb-3">
+          <label for="password" class="form-label">Senha</label>
+          <input type="password" class="form-control" id="password" name="password" required>
+        </div>
+
+        {% if error %}
+        <div class="alert alert-danger">{{ error }}</div>
+        {% endif %}
+
+        <button type="submit" class="btn btn-primary w-100">Entrar</button>
+      </form>
+
+      <div class="text-center mt-3">
+        <a href="/signup">Não tem conta? Cadastre-se</a>
+      </div>
+    </div>
+  </div>
+</div>
 {% endblock %}
