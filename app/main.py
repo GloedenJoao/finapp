@@ -745,7 +745,7 @@ def home(request: Request, day: Optional[str] = Query(default=None), include_sim
                 Transaction.group_id.label("gid"),
                 func.sum(case((Category.kind == "in", Transaction.amount), else_=0.0)).label("sum_in"),
                 func.sum(case((Category.kind == "out", -Transaction.amount), else_=0.0)).label("sum_out"),
-                func.sum(case((Category.kind == "in", Transaction.amount), else_=-Transaction.amount)).label("net"),
+                func.sum(case((Category.kind in ("in","out"), Transaction.amount), else_=0.0)).label("net"),
                 func.count(Transaction.id).label("qty"),
             )
             .join(Category, Category.id == Transaction.category_id)
